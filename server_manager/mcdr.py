@@ -5,15 +5,19 @@ MCDR 通过 pip 装进共享 venv（项目 venv），一次即可；每个服务
 
 插件策略（用户已拍板）：配置里给显式 URL，工具下载后放入实例的 plugins/。
 MCDR 启动时会加载 plugins/ 下的插件；也可在运行中 !!MCDR plg reloadall。
+
+插件跨 MC 版本通用：下载统一进共享缓存 .cache/plugins/（一次网络下载），
+各实例 deploy 时从缓存复制到自身 plugins/，多版本不重复下载。
 """
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 
 from .config import PluginSpec, RootConfig
 from .http_util import Http
-from .paths import instance_paths, venv_bin
+from .paths import CACHE_ROOT, instance_paths, venv_bin
 
 DEFAULT_JDK_ARGS = [
     "-Xms1G",
@@ -22,6 +26,9 @@ DEFAULT_JDK_ARGS = [
     "-Dstdout.encoding=UTF-8",
     "-Dstderr.encoding=UTF-8",
 ]
+
+# 插件共享缓存目录（跨实例/跨 MC 版本复用同一插件文件）
+PLUGIN_CACHE_DIR = CACHE_ROOT / "plugins"
 
 
 def render_start_command(
@@ -251,14 +258,19 @@ def install_plugins(
     http: Http,
     force: bool = False,
 ) -> list[Path]:
-    """把配置的 MCDR 插件（显式 URL）下载到实例 plugins/ 目录。返回落盘文件。
+    """把配置的 MCDR 插件（显式 URL）装进实例 plugins/。返回落盘到实例的文件。
 
-    force=False（默认）：目标已存在且非空则复用（断点续部署/补齐）。
-    force=True：无条件重下覆盖（用于 --force 重新部署 / 更新插件）。
+    插件跨 MC 版本通用，故统一走**共享缓存** `.cache/plugins/`：
+      1) 缓存里没有该文件（或 force）→ 网络下载到缓存（一次）；
+      2) 从缓存复制到实例 plugins/（实例已有且非空且非 force 时跳过）。
+    返回的是实例 plugins/ 下的路径（保持原调用方语义）。
+    详细状态（网络下载 / 缓存命中 / 实例已有）在此打印。
     """
     paths = instance_paths(mc_version)
     plugins_dir = paths["plugins"]
     plugins_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir = PLUGIN_CACHE_DIR
+    cache_dir.mkdir(parents=True, exist_ok=True)
     installed: list[Path] = []
     for spec in plugins:
         if not spec.url:
@@ -267,10 +279,24 @@ def install_plugins(
         name = spec.url.rstrip("/").split("/")[-1]
         if not name or "." not in name:
             name = f"{spec.id}.py"
+        cache_file = cache_dir / name
         dest = plugins_dir / name
+
+        # 1) 先确保共享缓存有该文件（无缓存 / force 才真正联网下载）。
+        #    即使本实例插件已齐全也回填缓存，供其它新实例复用。
+        if force or not (cache_file.exists() and cache_file.stat().st_size > 0):
+            tag = "强制下载" if force else "下载"
+            print(f"[{mc_version}] {tag} 插件 -> 缓存: {name}")
+            http.download(spec.url, cache_file)
+
+        # 2) 实例已有且非空且非 force：跳过（补齐式/断点续部署）
         if not force and dest.exists() and dest.stat().st_size > 0:
+            print(f"[{mc_version}] 插件已存在，跳过: {name}")
             installed.append(dest)
             continue
-        http.download(spec.url, dest)
+
+        # 3) 从缓存复制到实例
+        print(f"[{mc_version}] 插件缓存命中，复制: {name}")
+        shutil.copyfile(cache_file, dest)
         installed.append(dest)
     return installed

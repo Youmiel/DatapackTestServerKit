@@ -46,6 +46,11 @@ deploy 做的事：探测 Java → 下载 fabric server jar → 初始化 MCDR �
 `config.yml`/`eula.txt`/`server.properties`（应用端口/RCON/启动命令）→ 下载 mod 到
 `mods/` → 下载插件到 `plugins/` → 生成 `start.bat`。
 
+**插件共享缓存**：MCDR 插件跨 MC 版本通用，下载统一先进 `.cache/plugins/`
+（同一 URL 只网络下载一次），再复制到各实例 `plugins/` —— 多版本部署同一插件
+不重复下载。首次某个版本部署时显示“下载 插件 → 缓存”，后续其它版本部署显示
+“插件缓存命中，复制”。
+
 ### deploy 默认是"幂等补齐"（断点继续 / 自动补齐）
 
 - 已有且非空的 jar / mod / 插件**自动跳过**，只下载缺失的 —— 部署中途断网/中断后
@@ -58,8 +63,8 @@ deploy 做的事：探测 Java → 下载 fabric server jar → 初始化 MCDR �
 ### `deploy --force` 强制重新部署
 
 `--force` 会**无条件重下** jar / mod / 插件并覆盖已有文件（用于强制拉取最新版本、
-  loader 等）。注意：只覆盖配置里仍存在的文件，**不会**删除配置中已移除的旧
-  mod/插件残留。
+  loader 等），同时刷新 `.cache/plugins/` 里的插件共享缓存。
+注意：只覆盖配置里仍存在的文件，**不会**删除配置中已移除的旧 mod/插件残留。
 
 ## 启动
 

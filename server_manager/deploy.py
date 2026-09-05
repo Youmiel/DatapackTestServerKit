@@ -157,19 +157,14 @@ def deploy_instance(
         print(f"[deploy {mc_version}] {deploy_tag}下载 mod {rm.filename} ({rm.version_label})")
         mod_files.append(mods.download_mod(rm, paths["mods"], cfg, force=force))
 
-    # 4. MCDR 插件
+    # 4. MCDR 插件（下载进 .cache/plugins/ 共享缓存，再复制到实例）
     plugin_files: list[Path] = []
     for spec in group.plugins:
         if dry_run:
             print(f"[deploy {mc_version}] 解析 插件 {spec.id} <- {spec.url}")
             continue
         installed = mcdr.install_plugins(mc_version, [spec], http, force=force)
-        for p in installed:
-            plugin_files.append(p)
-            if force or not (p.exists() and p.stat().st_size > 0):
-                print(f"[deploy {mc_version}] {deploy_tag}下载 插件 {p.name}")
-            else:
-                print(f"[deploy {mc_version}] 插件已存在，跳过: {p.name}")
+        plugin_files.extend(installed)
 
     return DeployResult(
         mc_version=mc_version,

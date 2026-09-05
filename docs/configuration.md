@@ -144,6 +144,11 @@ plugins:
 工具下载 URL 到实例 `plugins/`，MCDR 启动时自动加载。插件官方目录
 <https://mcdreforged.com/en/plugins> 可查各插件 release 直链。
 
+**插件跨 MC 版本通用，带共享缓存**：插件文件（如 `.mcdr`）不区分 MC 版本，
+工具下载时统一先进 `.cache/plugins/` 共享缓存（同一 URL 只网络下载一次），
+再复制到各实例的 `plugins/`。多版本实例部署同一插件不再重复下载；
+`deploy --force` 会强制重下并刷新该缓存。
+
 ---
 
 ## modrinth / curseforge

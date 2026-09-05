@@ -12,7 +12,10 @@ DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
 # 服务器实例根目录
 SERVERS_ROOT = PROJECT_ROOT / "servers"
 
-# 下载缓存目录（已下载的 jar/mod 二次部署可复用）
+# 下载缓存目录
+#   .cache/mojang_java/  Mojang Java 要求（24h TTL）
+#   .cache/plugins/      MCDR 插件（跨 MC 版本通用，一次下载多实例复制复用）
+#   （fabric jar / mod 在各自实例内复用，未跨实例共享）
 CACHE_ROOT = PROJECT_ROOT / ".cache"
 
 # MCDR 共享 venv 里的可执行文件（Windows: Scripts, 其他: bin）
