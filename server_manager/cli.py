@@ -1,10 +1,13 @@
 """CLI 入口：mcserver <子命令>
 
 子命令：
-  deploy [--group ID] [--version V] [--dry-run]  部署（下载 fabric/mod/插件、生成配置）
+  deploy [--group ID] [--version V] [--dry-run] [--force]  部署（下载 fabric/mod/插件、生成配置）
+                                                              --force: 强制重下全部（覆盖已有）
+                                                              默认幂等/补齐：已有跳过、缺失下载（断点续部署）
   list                                            列出配置中的版本组与实例
   status [--version V]                            查看各实例部署状态与启动指引
-  start  [--version V]                            前台透传运行 MCDR（等同进目录跑）
+  start  [--version V] [--update]                 前台透传运行 MCDR（等同进目录跑）；
+                                                  --update: 先就地刷新启动命令/端口（不同端口，同步配置变更）再启动
   set-ports [--group ID] [--version V]            改端口/RCON（部署后冷改，配置+命令行）
 
 启动服务器：工具不托管进程，deploy 后在实例目录生成 start.bat/start.sh，
@@ -16,7 +19,7 @@ import argparse
 import sys
 
 from . import server as server_mgr
-from .config import ConfigError, load_config
+from .config import ConfigError, InstanceGroup, load_config
 from .deploy import deploy_group
 from .paths import DEFAULT_CONFIG_PATH
 
@@ -46,12 +49,15 @@ def cmd_deploy(cfg, args) -> int:
         else:
             raise ConfigError(f"配置里没有版本 {mc_version}")
 
+    force = bool(getattr(args, "force", False))
     # 若指定了 --version 且 group 存在，部署单个；否则按组
     if group_id and mc_version:
         g = cfg.find_group(group_id)
-        deploy_mod.deploy_instance(cfg, g, mc_version, dry_run=args.dry_run)
+        deploy_mod.deploy_instance(
+            cfg, g, mc_version, dry_run=args.dry_run, force=force
+        )
     else:
-        deploy_group(cfg, group_id, dry_run=args.dry_run)
+        deploy_group(cfg, group_id, dry_run=args.dry_run, force=force)
     return 0
 
 
@@ -98,9 +104,37 @@ def cmd_status(cfg, args) -> int:
 
 
 def cmd_start(cfg, args) -> int:
+    """前台启动实例。--update 时先就地刷新启动命令/端口（同端口，同步配置变更）再启动。"""
     gid, ver = _parse_target(args)
     _, ver = _resolve(cfg, gid, ver)
+    if getattr(args, "update", False):
+        from .deploy import sync_instance_files
+
+        # _resolve 已把 (gid, ver) 解出来，这里按组定位以取组级 server 覆盖
+        g = cfg.find_group(gid) if gid else _find_group_by_version(cfg, ver)
+        _require_deployed_files(cfg, ver)  # 明确提示缺 config.yml 时先 deploy
+        print(f"[start] 就地同步 {ver} 启动配置（config.yml / 端口 / start.bat）...")
+        sync_instance_files(cfg, g, ver)
+        print(f"[start] 启动命令/端口已按当前配置更新完毕，开始启动")
     return server_mgr.run_foreground(ver)
+
+
+def _find_group_by_version(cfg, ver) -> InstanceGroup:
+    for g in cfg.groups:
+        if ver in g.instances:
+            return g
+    raise ConfigError(f"配置里没有版本 {ver}")
+
+
+def _require_deployed_files(cfg, ver) -> None:
+    """--update 前检查实例是否已部署（缺 config.yml 提示先 deploy）。"""
+    from .paths import instance_paths
+
+    if not instance_paths(ver)["mcdr_config"].exists():
+        raise FileNotFoundError(
+            f"[{ver}] 尚未部署（缺 config.yml）。请先运行 deploy，或用 "
+            f"`mcserver deploy --version {ver}` 完成首次部署后再 start --update。"
+        )
 
 
 def _iter_targets(cfg, args) -> list[tuple]:
@@ -183,10 +217,11 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--group", help="版本组 id")
         sp.add_argument("--version", help="MC 小版本，如 1.21.1")
 
-    sp = sub.add_parser("deploy", help="部署版本实例")
+    sp = sub.add_parser("deploy", help="部署版本实例（默认幂等补齐；--force 强制重下）")
     sp.add_argument("--config", dest="config_dup", help=argparse.SUPPRESS)
     add_target(sp)
     sp.add_argument("--dry-run", action="store_true", help="只解析，不实际下载/落盘")
+    sp.add_argument("--force", action="store_true", help="强制重新部署：重下全部资源并覆盖已有文件")
     sp.set_defaults(func=cmd_deploy)
 
     sp = sub.add_parser("list", help="列出配置的版本组")
@@ -198,9 +233,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--version")
     sp.set_defaults(func=cmd_status)
 
-    sp = sub.add_parser("start", help="前台启动实例（透传运行 MCDR）")
+    sp = sub.add_parser("start", help="前台启动实例（--update 先就地更新启动命令再启动）")
     sp.add_argument("--config", dest="config_dup", help=argparse.SUPPRESS)
     add_target(sp)
+    sp.add_argument(
+        "--update",
+        action="store_true",
+        help="启动前就地刷新启动配置（config.yml 启动命令/端口/RCON、start.bat），"
+        "同步配置变更（同端口更新），不下载任何资源",
+    )
     sp.set_defaults(func=cmd_start)
 
     sp = sub.add_parser(

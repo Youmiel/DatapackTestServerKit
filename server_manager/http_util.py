@@ -1,14 +1,16 @@
-"""HTTP 下载通用工具：代理、超时、UA、SHA1 校验、进度。"""
+"""HTTP 下载通用工具：代理、超时、UA、SHA1 校验、进度、失败重试。"""
 from __future__ import annotations
 
 import hashlib
 import os
+import time
 from pathlib import Path
 from typing import Callable
 
 import requests
 
 DEFAULT_TIMEOUT = 60
+DEFAULT_ATTEMPTS = 3
 ProgressCb = Callable[[int, int], None]
 
 
@@ -17,6 +19,12 @@ class DownloadError(Exception):
 
 
 class Http:
+    """HTTP 客户端。
+
+    attempts: 每个请求/下载的**整体**尝试次数（含首次），>1 时失败会间隔退避重试。
+    配合连接层 urllib3 Retry 处理瞬时错误；attempts 兜底 5xx/超时/断流等整体失败。
+    """
+
     def __init__(
         self,
         timeout: int = DEFAULT_TIMEOUT,
@@ -24,9 +32,13 @@ class Http:
         user_agent: str = "mc-multiversion-deployer",
         extra_headers: dict | None = None,
         api_key: str = "",
-        retries: int = 3,
+        retries: int = 0,  # 连接层 urllib3 重试（向后兼容，默认关闭）
+        attempts: int = DEFAULT_ATTEMPTS,  # 整体重试次数（含首次）
+        backoff: float = 2.0,
     ):
         self.timeout = timeout
+        self.attempts = max(1, int(attempts))
+        self.backoff = backoff
         session = requests.Session()
         # 不读系统/环境代理（Windows 系统代理常干扰 MC 相关下载）；
         # 仅当配置显式给了 proxy 才使用。trust_env=False 也避免读 HTTP(S)_PROXY。
@@ -34,16 +46,17 @@ class Http:
         if proxy:
             session.proxies.update({"http": proxy, "https": proxy})
         # 连接层重试（对临时网络波动更稳）
-        adapter = requests.adapters.HTTPAdapter(
-            max_retries=requests.adapters.Retry(
-                total=retries,
-                backoff_factor=1.0,
-                status_forcelist=[429, 500, 502, 503, 504],
-                allowed_methods=None,
+        if retries:
+            adapter = requests.adapters.HTTPAdapter(
+                max_retries=requests.adapters.Retry(
+                    total=retries,
+                    backoff_factor=1.0,
+                    status_forcelist=[429, 500, 502, 503, 504],
+                    allowed_methods=None,
+                )
             )
-        )
-        session.mount("http://", adapter)
-        session.mount("https://", adapter)
+            session.mount("http://", adapter)
+            session.mount("https://", adapter)
         headers = {"User-Agent": user_agent}
         if extra_headers:
             headers.update(extra_headers)
@@ -52,13 +65,18 @@ class Http:
         session.headers.update(headers)
         self.session = session
 
-    def get_json(self, url: str) -> dict | list:
-        try:
-            r = self.session.get(url, timeout=self.timeout)
-            r.raise_for_status()
-            return r.json()
-        except requests.RequestException as e:
-            raise DownloadError(f"GET {url} 失败: {e}") from e
+    def get_json(self, url: str, params: dict | None = None) -> dict | list:
+        """GET JSON；失败按 attempts 重试。"""
+        last_err: Exception | None = None
+        for i in range(self.attempts):
+            try:
+                r = self.session.get(url, params=params, timeout=self.timeout)
+                r.raise_for_status()
+                return r.json()
+            except requests.RequestException as e:
+                last_err = e
+                self._warn(url, i)
+        raise DownloadError(f"GET {url} 失败（已重试 {self.attempts} 次）: {last_err}") from last_err
 
     def download(
         self,
@@ -69,44 +87,74 @@ class Http:
         progress: ProgressCb | None = None,
         chunk_size: int = 256 * 1024,
     ) -> Path:
-        """下载到 dest。若给了 sha1 则校验；失败抛 DownloadError。"""
+        """下载到 dest。若给了 sha1 则校验；失败按 attempts 重试后抛 DownloadError。"""
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_suffix(dest.suffix + ".part")
-        hasher = hashlib.sha1()
-        try:
-            with self.session.get(url, stream=True, timeout=self.timeout) as r:
-                r.raise_for_status()
-                total = int(r.headers.get("Content-Length") or 0)
-                done = 0
-                with open(tmp, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=chunk_size):
-                        if not chunk:
-                            continue
-                        f.write(chunk)
-                        hasher.update(chunk)
-                        done += len(chunk)
-                        if progress:
-                            progress(done, total)
-        except requests.RequestException as e:
+        last_err: Exception | None = None
+        for i in range(self.attempts):
             tmp.unlink(missing_ok=True)
-            raise DownloadError(f"下载 {url} 失败: {e}") from e
-        if sha1:
-            actual = hasher.hexdigest()
-            if actual.lower() != sha1.lower():
+            hasher = hashlib.sha1()
+            try:
+                with self.session.get(url, stream=True, timeout=self.timeout) as r:
+                    r.raise_for_status()
+                    total = int(r.headers.get("Content-Length") or 0)
+                    done = 0
+                    with open(tmp, "wb") as f:
+                        for chunk in r.iter_content(chunk_size=chunk_size):
+                            if not chunk:
+                                continue
+                            f.write(chunk)
+                            hasher.update(chunk)
+                            done += len(chunk)
+                            if progress:
+                                progress(done, total)
+            except requests.RequestException as e:
+                last_err = e
                 tmp.unlink(missing_ok=True)
-                raise DownloadError(
-                    f"SHA1 校验失败 {dest.name}: 期望 {sha1} 实际 {actual}"
-                )
-        os.replace(tmp, dest)
-        return dest
+                self._warn(url, i)
+                continue
+            if sha1:
+                actual = hasher.hexdigest()
+                if actual.lower() != sha1.lower():
+                    last_err = DownloadError(
+                        f"SHA1 校验失败 {dest.name}: 期望 {sha1} 实际 {actual}"
+                    )
+                    tmp.unlink(missing_ok=True)
+                    self._warn(url, i)
+                    continue
+            if progress:
+                print()  # 结束进度行
+            os.replace(tmp, dest)
+            return dest
+        raise DownloadError(
+            f"下载 {dest.name} 失败（已重试 {self.attempts} 次）: {last_err}"
+        ) from last_err
+
+    def _warn(self, url: str, attempt_index: int) -> None:
+        """第 attempt_index 次（0 起）失败且还有下次时打印提示。"""
+        if attempt_index + 1 >= self.attempts:
+            return
+        wait = self.backoff * (2 ** attempt_index)
+        print(f"[网络] 尝试 {attempt_index + 1}/{self.attempts} 失败：{url}（{wait:.0f}s 后重试）")
+        time.sleep(wait)
 
 
-def build_modrinth_http(cfg_modrinth: dict, cfg_network: dict) -> Http:
+def _build_http(
+    cfg_modrinth: dict, cfg_curseforge: dict, cfg_network: dict, api_key: str
+) -> Http:
     return Http(
         timeout=int(cfg_network.get("timeout", DEFAULT_TIMEOUT)),
         proxy=str(cfg_network.get("proxy", "")),
-        user_agent=str(cfg_modrinth.get("user_agent", "") or "mc-multiversion-deployer"),
+        user_agent=str(cfg_modrinth.get("user_agent", "")
+                          or cfg_curseforge.get("user_agent", "")
+                          or "mc-multiversion-deployer"),
+        api_key=api_key,
+        attempts=int(cfg_network.get("download_retries", DEFAULT_ATTEMPTS)),
     )
+
+
+def build_modrinth_http(cfg_modrinth: dict, cfg_network: dict) -> Http:
+    return _build_http(cfg_modrinth, {}, cfg_network, "")
 
 
 def build_curseforge_http(cfg_curseforge: dict, cfg_network: dict) -> Http:
@@ -118,10 +166,4 @@ def build_curseforge_http(cfg_curseforge: dict, cfg_network: dict) -> Http:
             f"CurseForge 需要 API key：请设置环境变量 {env_name} "
             f"（参考 https://console.curseforge.com/ 申请）"
         )
-    return Http(
-        timeout=int(cfg_network.get("timeout", DEFAULT_TIMEOUT)),
-        proxy=str(cfg_network.get("proxy", "")),
-        user_agent=str(cfg_curseforge.get("user_agent", ""))
-        or "mc-multiversion-deployer",
-        api_key=key,
-    )
+    return _build_http({}, cfg_curseforge, cfg_network, key)

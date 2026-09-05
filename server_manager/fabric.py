@@ -73,10 +73,14 @@ def resolve_server_jar_url(
 
 
 def download_server_jar(
-    http: Http, artifact: FabricArtifact, dest: Path
+    http: Http, artifact: FabricArtifact, dest: Path, force: bool = False
 ) -> Path:
-    """下载 fabric server jar 到 dest（保存为统一的 minecraft_server.jar）。"""
-    if dest.exists():
+    """下载 fabric server jar 到 dest（保存为统一的 minecraft_server.jar）。
+
+    force=False（默认）：已有非空文件则复用（断点续部署/补齐场景）。
+    force=True：无条件重下覆盖（用于 --force 重新部署 / 更新 loader）。
+    """
+    if not force and dest.exists():
         # 简单存在性检查：非空即可复用
         if dest.stat().st_size > 0:
             return dest

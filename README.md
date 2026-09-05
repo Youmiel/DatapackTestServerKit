@@ -8,6 +8,9 @@
 
 - **多版本并行**：按"大版本组"组织，组内共享 mod/插件列表，可展开任意数量小版本（`servers/<版本>/`）
 - **自动装 Fabric**：官方 meta API 直接下载可启动的 server jar（含 loader，免 installer）
+- **下载自动补齐/断点继续**：deploy 幂等 —— 已有文件跳过、缺失才下载；失败自动重试（`network.download_retries`）
+- **强制重新部署**：`deploy --force` 无条件重下全部资源并覆盖
+- **同端口更新启动命令**：`start --update` 启动前就地刷新 config.yml 启动命令/端口/start.bat（不下载资源）
 - **自动匹配 mod**：mod 按大版本配一次，自动选各小版本兼容版本
 - **MCDR 集成**：每个实例独立运行目录；插件按显式 URL 下载进 `plugins/`
 - **Java 自动推断**：按目标 MC 版本查 Mojang 官方数据，自动推断所需 Java 并在官方运行时精确定位（无需人工映射）
@@ -61,9 +64,9 @@ Copy-Item config.example.yaml config.yaml
 | 命令 | 说明 |
 | --- | --- |
 | `list` | 列出配置中的版本组、实例、mod、插件 |
-| `deploy [--group G] [--version V] [--dry-run]` | 部署指定/全部实例（`--dry-run` 只解析不下载） |
+| `deploy [--group G] [--version V] [--dry-run] [--force]` | 部署指定/全部实例（默认幂等补齐、断点继续；`--force` 重下全部并覆盖） |
 | `status [--version V]` | 查看部署状态与启动方式 |
-| `start [--group G] [--version V]` | 前台启动 MCDR |
+| `start [--group G] [--version V] [--update]` | 前台启动 MCDR（`--update` 先就地刷新启动命令/端口再启动） |
 | `set-ports [--group G] [--version V] [--port N] [--rcon-*]` | 改端口/RCON（部署后冷改） |
 
 `--config <path>` 指定配置文件（默认 `./config.yaml`），子命令前后均可。

@@ -188,11 +188,17 @@ def resolve_mods(
     return out
 
 
-def download_mod(resolved: ResolvedMod, mods_dir: Path, cfg: RootConfig) -> Path:
-    """把已解析的 mod 下载到 mods 目录（带 sha1 校验）。"""
+def download_mod(
+    resolved: ResolvedMod, mods_dir: Path, cfg: RootConfig, force: bool = False
+) -> Path:
+    """把已解析的 mod 下载到 mods 目录（带 sha1 校验）。
+
+    force=False（默认）：目标已存在且非空则复用（断点续部署/补齐）。
+    force=True：无条件重下覆盖（用于 --force 重新部署 / 更新 mod）。
+    """
     mods_dir.mkdir(parents=True, exist_ok=True)
     dest = mods_dir / resolved.filename
-    if dest.exists() and dest.stat().st_size > 0:
+    if not force and dest.exists() and dest.stat().st_size > 0:
         return dest
     http = (
         build_curseforge_http(cfg.curseforge, cfg.network)

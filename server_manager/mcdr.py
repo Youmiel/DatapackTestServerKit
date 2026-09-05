@@ -246,9 +246,16 @@ def write_mcdr_config(
 
 
 def install_plugins(
-    mc_version: str, plugins: list[PluginSpec], http: Http
+    mc_version: str,
+    plugins: list[PluginSpec],
+    http: Http,
+    force: bool = False,
 ) -> list[Path]:
-    """把配置的 MCDR 插件（显式 URL）下载到实例 plugins/ 目录。返回落盘文件。"""
+    """把配置的 MCDR 插件（显式 URL）下载到实例 plugins/ 目录。返回落盘文件。
+
+    force=False（默认）：目标已存在且非空则复用（断点续部署/补齐）。
+    force=True：无条件重下覆盖（用于 --force 重新部署 / 更新插件）。
+    """
     paths = instance_paths(mc_version)
     plugins_dir = paths["plugins"]
     plugins_dir.mkdir(parents=True, exist_ok=True)
@@ -261,7 +268,7 @@ def install_plugins(
         if not name or "." not in name:
             name = f"{spec.id}.py"
         dest = plugins_dir / name
-        if dest.exists() and dest.stat().st_size > 0:
+        if not force and dest.exists() and dest.stat().st_size > 0:
             installed.append(dest)
             continue
         http.download(spec.url, dest)

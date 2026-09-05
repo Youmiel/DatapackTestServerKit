@@ -173,7 +173,7 @@ class RootConfig:
 
 
 def _default_network() -> dict:
-    return {"timeout": 60, "proxy": "", "verify_sha1": True}
+    return {"timeout": 60, "proxy": "", "verify_sha1": True, "download_retries": 3}
 
 
 def _default_modrinth() -> dict:

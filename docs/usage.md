@@ -39,11 +39,27 @@ version_groups:
 .\venv\Scripts\python.exe mcserver.py deploy --group 1.21               # 部署某组全部
 .\venv\Scripts\python.exe mcserver.py deploy --version 1.21.1           # 部署单个
 .\venv\Scripts\python.exe mcserver.py deploy --version 1.21.1 --dry-run # 只解析展示，不下载
+.\venv\Scripts\python.exe mcserver.py deploy --version 1.21.1 --force   # 强制重下全部并覆盖
 ```
 
 deploy 做的事：探测 Java → 下载 fabric server jar → 初始化 MCDR 实例目录 → 生成
 `config.yml`/`eula.txt`/`server.properties`（应用端口/RCON/启动命令）→ 下载 mod 到
 `mods/` → 下载插件到 `plugins/` → 生成 `start.bat`。
+
+### deploy 默认是"幂等补齐"（断点继续 / 自动补齐）
+
+- 已有且非空的 jar / mod / 插件**自动跳过**，只下载缺失的 —— 部署中途断网/中断后
+  重跑同一条命令即可**从断点继续**，不会重复下载。
+- 配置里**新增了 mod / 插件**后重跑 `deploy`，会自动把新文件补齐进既有实例
+  （旧文件不删除，多余的手动清理即可）。
+- 下载失败会按 `network.download_retries`（默认 3）自动重试，仍失败才报错中断，
+  此时可修复网络后重跑（断点继续）。
+
+### `deploy --force` 强制重新部署
+
+`--force` 会**无条件重下** jar / mod / 插件并覆盖已有文件（用于强制拉取最新版本、
+  loader 等）。注意：只覆盖配置里仍存在的文件，**不会**删除配置中已移除的旧
+  mod/插件残留。
 
 ## 启动
 
@@ -58,6 +74,24 @@ MCDR 是交互式前台控制台工具，工具**不托管**其进程（后台�
 .\servers\1.21.1\start.bat      # Windows
 ./servers/1.21.1/start.sh       # Linux/macOS
 ```
+
+### `start --update` —— 同端口更新启动命令（不下载资源）
+
+改了配置里该组的 `server` 块（端口 / RCON / `start_command_template`）或全局
+`mcdr.language` 后，想让既有实例**原地更新启动命令**再启动（不换端口、不重下
+mod），用：
+
+```powershell
+.\venv\Scripts\python.exe mcserver.py start --version 1.21.1 --update
+```
+
+`--update` 会在启动前就地刷新：
+- MCDR `config.yml` 的 `start_command`（含自定义模板变更）、`language`
+- `server.properties` 与 `config.yml` 的**端口 / RCON**（与当前配置保持一致）
+- `start.bat` / `start.sh`
+
+它**只同步本地生成文件、不联网下载任何资源**，且保持同端口，适合"改了启动参数
+/ 端口后重启实例"的场景。要求实例已部署过（缺 `config.yml` 会提示先 `deploy`）。
 
 MCDR 控制台常用命令：`!!MCDR status`、`!!MCDR server stop_exit`（停服并退出）、`!!MCDR exit`。
 也可直接 `Ctrl+C`。
