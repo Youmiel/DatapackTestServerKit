@@ -1,0 +1,22 @@
+# Python
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# 本工具运行产物 / 个人配置
+config.yaml          
+servers/            
+.cache/             
+
+# 编辑器 / 系统
+.vscode/
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log
+logs/

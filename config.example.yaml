@@ -1,0 +1,157 @@
+# =============================================================================
+#  Minecraft 多版本测试服务器部署工具 —— 配置文件
+#  复制本文件为 config.yaml 后按需修改（工具默认读取 config.yaml）
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+#  Java 运行时探测
+#  -----------------------------------------------------------------------------
+#  说明：不同 MC 版本要求的 Java 不同（1.20.x 需 Java 17，1.20.5+/1.21 需 21…）。
+#  本工具在 deploy 时**自动推断**该 MC 版本官方要求的 Java（查询 Mojang 官方
+#  数据，无需人工维护映射），探测并固定路径，后续启动始终用该路径。
+#
+#  探测/选择顺序：
+#    1) 下方 launcher_roots 里的 MC 官方启动器 runtime 目录 —— 优先精确定位
+#       与该版本官方要求同名的 java-runtime-<component>（如 delta/gamma）
+#    2) 环境变量 JAVA_HOME（use_env_fallback=true 时）
+#    3) 系统 PATH 中的 java（use_env_fallback=true 时）
+#  launcher_roots 可留空 [] —— 此时仅靠 JAVA_HOME / PATH。
+#  装了 MC 官方启动器的用户建议填 runtime 目录（含各版本官方运行时，最省心）：
+#    - Windows 常见: C:/Program Files (x86)/Minecraft Launcher/runtime
+#                   或 %APPDATA%/.minecraft/runtime
+#    - Linux/macOS 常见: ~/.minecraft/runtime
+#  若本机没有该版本所需 Java（无论是否配了 preferred_major），deploy 会明确
+#  报错并列出可用 Java，不会默默用错版本导致服务端启动失败。
+#  自动推断结果会缓存到 .cache/（24h），离线可复用。
+java:
+  # MC 官方启动器的 runtime 目录（可多个；留空则仅靠 JAVA_HOME / PATH）
+  launcher_roots:
+    - "C:/Program Files (x86)/Minecraft Launcher/runtime"
+
+  # 是否允许回退到 JAVA_HOME / PATH 探测。默认 true
+  use_env_fallback: true
+
+# -----------------------------------------------------------------------------
+#  网络下载
+# -----------------------------------------------------------------------------
+network:
+  # 下载超时（秒）
+  timeout: 60
+  # 可选：代理，如 http://127.0.0.1:7890 （留空则直连）
+  proxy: ""
+  # 可选：是否校验下载文件的 SHA1（Modrinth 提供）；默认 true
+  verify_sha1: true
+
+# -----------------------------------------------------------------------------
+#  Modrinth API
+#  -----------------------------------------------------------------------------
+#  无需 key，但官方要求提供有辨识度的 User-Agent。改成你的标识。
+modrinth:
+  user_agent: "datapack-tester/0.1 (mc-multiversion-deployer)"
+
+# -----------------------------------------------------------------------------
+#  CurseForge API
+#  -----------------------------------------------------------------------------
+#  需要 API key。出于安全，key 不写在本文件里，而是通过环境变量提供：
+#  工具会读取 curseforge.api_key_env 指定的环境变量名。
+curseforge:
+  # 环境变量名（不是 key 本身）。例：$env:CURSEFORGE_API_KEY = "....."
+  api_key_env: "CURSEFORGE_API_KEY"
+
+# -----------------------------------------------------------------------------
+#  MCDR (MCDReforged) 全局设置
+#  -----------------------------------------------------------------------------
+#  MCDR 用 pip 安装到本项目共享 venv（只装一次），每个服务器实例各自
+#  拥有独立的 MCDR 运行目录（config.yml / plugins/ 等彼此隔离）。
+mcdr:
+  # pip 安装 MCDR 时的版本约束；留空 = 最新稳定 2.x
+  pip_spec: "mcdreforged>=2.0"
+  # MCDR 界面语言：en_us / zh_cn / zh_tw
+  language: "zh_cn"
+
+# -----------------------------------------------------------------------------
+#  服务器端口 / RCON 设置（可选）
+#  -----------------------------------------------------------------------------
+#  游戏端口与 RCON 的统一配置。部署（deploy）时自动应用；部署完后也可随时用
+#  `mcserver set-ports` 冷修改（不重启服务端也能改，重启后生效）。
+#
+#  RCON 需要同时配置两侧并保持一致：
+#    - MC 服务端：server.properties 的 enable-rcon / rcon.port / rcon.password
+#    - MCDR 侧   ：MCDR 作为 RCON 客户端连接服务端（config.yml 的 rcon 段）
+#  本工具会同时写入并保持两边一致。
+#
+#  注：每组实例默认统一用这套设置（一次只开一个实例，端口不冲突）；
+#      如需某组单独覆盖，可在该组下加同级 server: 块。
+server:
+  # 游戏端口（server-port）
+  port: 25565
+  rcon:
+    enable: false          # 是否启用 RCON
+    port: 25575            # RCON 端口
+    password: ""           # RCON 密码。启用时建议设置（留空则用默认 "password"）
+    # address: 127.0.0.1   # RCON 地址（MCDR 连接用，一般不用改）
+
+# -----------------------------------------------------------------------------
+#  服务器版本组（核心配置）
+#  -----------------------------------------------------------------------------
+#  每个组 = 一个大版本线，组内共享：mod 列表、MCDR 插件列表、Java 要求。
+#  组下的 instances 列出要部署的具体小版本 —— 每个小版本生成一个独立服务器。
+#  「版本数量可通过增删 instances 或整个组来调整」。
+#
+#  目录布局（每个小版本实例一个目录，均为自包含 MCDR 根）：
+#    servers/<版本>/
+#      config.yml           <- MCDR 配置（自动生成，exec 模式启动 java）
+#      plugins/             <- MCDR 插件（显式 URL 下载）
+#      start.bat / start.sh <- 一键前台启动 MCDR
+#      server/              <- MCDR working_directory（服务器文件）
+#        minecraft_server.jar  <- fabric server jar（含 loader，可直接启动）
+#        mods/                 <- fabric mod（来自 Modrinth/CurseForge）
+#        server.properties / eula.txt / world/  <- 首次启动自动生成
+#        world/datapacks/      <- 你手动放数据包的地方
+# =============================================================================
+version_groups:
+  # ---------------------------------------------------------------
+  # 示例组 1：1.21 线
+  # ---------------------------------------------------------------
+  - id: "1.21"                       # 组标识（仅用于组织，可自定义）
+    # 组内要部署的小版本（每个都创建一个独立服务器）
+    instances: ["1.21.1", "1.21.4"]
+    # 可选：本组 java 设置。默认可不配 —— 工具会按各 MC 版本自动推断所需 Java
+    #（查 Mojang 官方数据）。只有想强制指定某大版本 Java 时才填 preferred_major。
+    java:
+      # launcher_roots: []          # 可选：本组追加的启动器目录
+      # preferred_major: 21         # 可选：强制要求 Java 大版本（一般不填）
+    # 本组所有实例要安装的 fabric mod（可留空）
+    #   id     : Modrinth 项目 slug（或 CurseForge 项目 slug）
+    #   source : modrinth | curseforge
+    #   version: 可选。留空 = 自动选该 MC 版本下最新 fabric 兼容版
+    #            Modrinth 可用 version_id 锁定；CurseForge 可用 fileId 锁定
+    mods: []
+    # 本组所有实例要安装的 MCDR 插件（可留空）
+    #   id : 插件标识（仅作展示/记录）
+    #   url: 插件文件直链（GitHub release asset 等）。工具下载后放入 plugins/
+    plugins: []
+
+  # ---------------------------------------------------------------
+  # 示例组 2：1.20 线 —— 含如何填 mod/插件示例
+  # ---------------------------------------------------------------
+  - id: "1.20"
+    instances: ["1.20.1"]
+    # java: {}   # 可不配：1.20.1 会自动推断为 Java 17 (java-runtime-gamma)
+    # --- fabric mod 示例（Modrinth） ---
+    # mods:
+    #   - id: carpet              # https://modrinth.com/mod/carpet 的 slug
+    #     source: modrinth
+    #   - id: fabric-api          # 很多 mod 的前置
+    #     source: modrinth
+    #   # --- CurseForge 示例（需要 api_key） ---
+    #   - id: some-cf-mod
+    #     source: curseforge
+    mods: []
+    # --- MCDR 插件示例（显式 URL） ---
+    # plugins:
+    #   - id: quick_backup_multi
+    #     url: "https://github.com/TISUnion/QuickBackupM/releases/download/v1.10.1/QuickBackupM-v1.10.1.mcdr"
+    plugins: []
+
+# 若要预置 quick_backup_multi 到某组，把上面 plugins 示例取消注释并填真实 release URL
