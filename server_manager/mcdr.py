@@ -24,6 +24,37 @@ DEFAULT_JDK_ARGS = [
 ]
 
 
+def render_start_command(
+    java_exe: Path, server_settings=None
+) -> str | list[str]:
+    """根据 server 配置（含可选模板）生成 MCDR start_command。
+
+    - 未提供模板：返回 exec 模式 list（java + 默认 JVM 参数 + -jar {jar} nogui），
+      不经 shell，含空格路径安全（保持原有行为）。
+    - 提供模板：渲染占位符 {java}/{jar} 后返回 shell 字符串。
+      模板示例：'"{java}" -Xms2G -Xmx4G -XX:+UseG1GC -jar {jar} nogui'
+    """
+    from .config import ServerSettings
+
+    template = None
+    if server_settings is not None:
+        template = server_settings.start_command_template
+
+    if template:
+        # {java} -> 裸 java 路径（不加引号）。含空格路径请在模板里写成 "{java}"。
+        return template.replace("{java}", str(java_exe)).replace(
+            "{jar}", "minecraft_server.jar"
+        )
+
+    return [
+        str(java_exe),
+        *DEFAULT_JDK_ARGS,
+        "-jar",
+        "minecraft_server.jar",
+        "nogui",
+    ]
+
+
 def python_exe() -> Path:
     """返回项目 venv 的 python 可执行文件。"""
     return venv_bin(Path(__file__).resolve().parent.parent / "venv") / (
@@ -173,11 +204,17 @@ def write_server_settings(
         print(f"[{mc_version}] 跳过：config.yml 不存在（先 deploy）")
 
 
-def write_mcdr_config(mc_version: str, java_exe: Path, cfg: RootConfig) -> None:
-    """改写实例 config.yml：language、start_command（exec mode）、encoding。
+def write_mcdr_config(
+    mc_version: str,
+    java_exe: Path,
+    cfg: RootConfig,
+    server_settings=None,
+) -> None:
+    """改写实例 config.yml：language、start_command、encoding。
 
-    start_command 用 exec mode（list）直接 exec java，避免 shell 中间层。
-    使用绝对 java 路径 + 常见 JVM 参数 + fabric server jar（nogui）。
+    start_command 由 render_start_command 生成：
+      - 未配模板：exec mode（list）直接 exec java，不经 shell，含空格路径安全。
+      - 配了模板：按模板渲染为 shell 字符串。
 
     用 PyYAML 读改写（会丢失 MCDR 的注释，但保证字段结构绝对正确；
     缺失的其它字段 MCDR 启动时会自动补默认值）。
@@ -188,18 +225,12 @@ def write_mcdr_config(mc_version: str, java_exe: Path, cfg: RootConfig) -> None:
     cfg_path = paths["mcdr_config"]
     lang = cfg.mcdr.get("language", "zh_cn")
 
-    start_command = [
-        str(java_exe),
-        *DEFAULT_JDK_ARGS,
-        "-jar",
-        "minecraft_server.jar",
-        "nogui",
-    ]
+    start_command = render_start_command(java_exe, server_settings)
 
     data = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
     data["language"] = lang
     data["working_directory"] = "server"
-    data["start_command"] = start_command  # exec mode
+    data["start_command"] = start_command
     data["handler"] = "vanilla_handler"
     data.setdefault("encoding", "utf8")
     data.setdefault("decoding", "utf8")

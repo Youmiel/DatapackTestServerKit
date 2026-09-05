@@ -29,10 +29,13 @@ class RconSettings:
 
 @dataclass
 class ServerSettings:
-    """服务器端口与 RCON 设置（MC server.properties + MCDR rcon 同步）。"""
+    """服务器设置：端口、RCON、启动命令模板（MCDR start_command）。"""
 
     port: int | None = None  # None = 未指定
     rcon: RconSettings = field(default_factory=RconSettings)
+    # MCDR 启动命令模板。None/空 = 用默认（java -Xms1G -Xmx2G ... -jar {jar} nogui）
+    # 支持占位符：{java}（探测到的 java 绝对路径，自动加引号）、{jar}（server jar 文件名）
+    start_command_template: str | None = None
 
     def effective(self) -> "ServerSettings":
         """解析成具体值：未指定的字段补默认值。"""
@@ -43,7 +46,11 @@ class ServerSettings:
             password=self.rcon.password if self.rcon.password else "password",
             address=self.rcon.address if self.rcon.address else "127.0.0.1",
         )
-        return ServerSettings(port=port, rcon=r)
+        return ServerSettings(
+            port=port,
+            rcon=r,
+            start_command_template=self.start_command_template,
+        )
 
     def merged_with(self, base: "ServerSettings") -> "ServerSettings":
         """以 self 覆盖 base：self 未显式提供的字段沿用 base。"""
@@ -53,7 +60,8 @@ class ServerSettings:
         r.port = self.rcon.port if self.rcon.port is not None else base.rcon.port
         r.password = self.rcon.password if self.rcon.password not in (None, "") else base.rcon.password
         r.address = self.rcon.address if self.rcon.address not in (None, "") else base.rcon.address
-        return ServerSettings(port=port, rcon=r)
+        tpl = self.start_command_template if self.start_command_template is not None else base.start_command_template
+        return ServerSettings(port=port, rcon=r, start_command_template=tpl)
 
 
 @dataclass
@@ -194,6 +202,12 @@ def _parse_server(raw: Any) -> ServerSettings:
     return ServerSettings(
         port=int(port) if port is not None else None,
         rcon=rcon,
+        start_command_template=(
+            str(raw["start_command_template"])
+            if "start_command_template" in raw
+            and raw["start_command_template"] not in (None, "")
+            else None
+        ),
     )
 
 

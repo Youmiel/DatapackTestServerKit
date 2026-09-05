@@ -67,9 +67,10 @@ def deploy_instance(
         mcdr.ensure_mcdr_installed(cfg)
         mcdr.init_instance(mc_version)
         mcdr.write_eula_and_properties(mc_version)
-        mcdr.write_mcdr_config(mc_version, java.java_exe, cfg)
+        eff_server = cfg.effective_server(group)
+        mcdr.write_mcdr_config(mc_version, java.java_exe, cfg, eff_server)
         # 应用端口/RCON 设置（server.properties + MCDR config.yml 同步）
-        mcdr.write_server_settings(mc_version, cfg.effective_server(group))
+        mcdr.write_server_settings(mc_version, eff_server)
 
     # 2. fabric server jar
     http = build_modrinth_http(cfg.modrinth, cfg.network)
