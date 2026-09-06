@@ -47,36 +47,52 @@ class ModrinthSource(ModSource):
 
     def resolve(self, spec, mc_version, http):
         slug = spec.id
+        # 服务端过滤：只取该 MC 版本 + fabric 的版本（按发布时间倒序返回）
         params = {
             "game_versions": _json_arr([mc_version]),
             "loaders": _json_arr(["fabric"]),
         }
-        # 若用户给了精确 version_id / version_number，先尝试直接取该版本
-        if spec.version and len(spec.version) >= 8:
-            try:
-                data = http.get_json(f"{self.api}/version/{spec.version}")
-                if isinstance(data, dict) and data.get("id"):
-                    return self._pick(data, spec, mc_version)
-            except DownloadError:
-                pass  # 回退到列表查询
-        data = http.get_json(f"{self.api}/project/{slug}/version")
+        # 用户锁定 version：两种写法
+        #   - 8 位短 ID（如 uLkEd5dr） → 当作 version_id，直接取该版本
+        #   - 其余（version_number，如 0.155.2+26.1.2） → 在过滤列表里精确匹配
+        locked = (spec.version or "").strip()
+        if locked and _looks_like_version_id(locked):
+            data = http.get_json(f"{self.api}/version/{locked}")
+            if not isinstance(data, dict) or not data.get("id"):
+                raise DownloadError(
+                    f"Modrinth 项目 {slug} 找不到版本 id {locked}"
+                )
+            return self._pick(data, spec, mc_version)
+
+        data = http.get_json(
+            f"{self.api}/project/{slug}/version", params=params
+        )
         if not isinstance(data, list):
             raise DownloadError(f"Modrinth 项目 {slug} 不存在或不可用")
-        # 服务端过滤：仅保留匹配 mc 版本 + fabric + release 优先
-        cands = [
-            v
-            for v in data
-            if _match_game(v, mc_version)
-            and _match_loader(v, "fabric")
-        ]
-        if not cands:
+        if not data:
             raise DownloadError(
                 f"Modrinth 项目 {slug} 没有 {mc_version} + fabric 的版本"
             )
-        # 选稳定版优先，其次 beta/alpha
-        cands.sort(key=lambda v: (v.get("version_type") != "release", v.get("date_published", "")))
-        chosen = cands[0]
-        return self._pick(chosen, spec, mc_version)
+
+        if locked:
+            # version_number 精确匹配（忽略大小写），找不到明确报错、不静默降级
+            for v in data:
+                if v.get("version_number", "").lower() == locked.lower():
+                    return self._pick(v, spec, mc_version)
+            raise DownloadError(
+                f"Modrinth 项目 {slug} 在 {mc_version} + fabric 下找不到版本 "
+                f"{locked}。可用版本：\n"
+                + "\n".join(f"  - {v.get('version_number')}" for v in data)
+            )
+
+        # 未锁定：服务端已按日期倒序 → 优先 release，其次 beta/alpha
+        data.sort(
+            key=lambda v: (
+                v.get("version_type") != "release",
+                v.get("date_published", ""),
+            )
+        )
+        return self._pick(data[0], spec, mc_version)
 
     def _pick(self, version: dict, spec: ModSpec, mc_version: str) -> ResolvedMod:
         # 优先选主文件（primary），且文件名不能是 sources jar
@@ -145,12 +161,12 @@ def _json_arr(arr: list[str]) -> str:
     return json.dumps(arr)
 
 
-def _match_game(version: dict, mc_version: str) -> bool:
-    return mc_version in version.get("game_versions", [])
+def _looks_like_version_id(s: str) -> bool:
+    """Modrinth version_id 是 8 位字母数字短码（如 uLkEd5dr）。
 
-
-def _match_loader(version: dict, loader: str) -> bool:
-    return loader in version.get("loaders", [])
+    version_number 通常含 +、.、- 或更长，据此区分两种锁定写法。
+    """
+    return len(s) == 8 and s.isalnum()
 
 
 def _is_fabric_cf(file: dict) -> bool:
