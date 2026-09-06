@@ -18,6 +18,12 @@ class ConfigError(Exception):
     """配置错误。"""
 
 
+# server.properties 的 gamemode 合法值（写文件用字符串）
+GAMEMODES = ("survival", "creative", "adventure", "spectator")
+# 默认游戏模式：测试服务器用创造（方便搭/查数据包）
+DEFAULT_GAMEMODE = "creative"
+
+
 @dataclass
 class RconSettings:
     # None = 未显式指定（用于组级覆盖时表示“继承顶层”）
@@ -29,9 +35,11 @@ class RconSettings:
 
 @dataclass
 class ServerSettings:
-    """服务器设置：端口、RCON、启动命令模板（MCDR start_command）。"""
+    """服务器设置：端口、游戏模式、RCON、启动命令模板（MCDR start_command）。"""
 
     port: int | None = None  # None = 未指定
+    # 游戏模式（server.properties gamemode）。None/空 = 未指定 → 用默认 creative
+    gamemode: str | None = None
     rcon: RconSettings = field(default_factory=RconSettings)
     # MCDR 启动命令模板。None/空 = 用默认（java -Xms1G -Xmx2G ... -jar {jar} nogui）
     # 支持占位符：{java}（探测到的 java 绝对路径，自动加引号）、{jar}（server jar 文件名）
@@ -40,6 +48,7 @@ class ServerSettings:
     def effective(self) -> "ServerSettings":
         """解析成具体值：未指定的字段补默认值。"""
         port = 25565 if self.port is None else self.port
+        gm = self._norm_gamemode(self.gamemode)
         r = RconSettings(
             enable=False if self.rcon.enable is None else self.rcon.enable,
             port=25575 if self.rcon.port is None else self.rcon.port,
@@ -48,20 +57,39 @@ class ServerSettings:
         )
         return ServerSettings(
             port=port,
+            gamemode=gm,
             rcon=r,
             start_command_template=self.start_command_template,
         )
 
+    @staticmethod
+    def _norm_gamemode(v: str | None) -> str | None:
+        """规整 gamemode：数字转名、去空白小写；非法值抛 ConfigError。"""
+        if v is None:
+            return None
+        s = str(v).strip().lower()
+        # 兼容数字写法（0=survival 1=creative 2=adventure 3=spectator）
+        num_map = {"0": "survival", "1": "creative", "2": "adventure", "3": "spectator"}
+        s = num_map.get(s, s)
+        if s not in GAMEMODES:
+            raise ConfigError(
+                f"无效的 gamemode: {v!r}（可选 {', '.join(GAMEMODES)}）"
+            )
+        return s
+
     def merged_with(self, base: "ServerSettings") -> "ServerSettings":
         """以 self 覆盖 base：self 未显式提供的字段沿用 base。"""
         port = self.port if self.port is not None else base.port
+        gm = self._norm_gamemode(self.gamemode)
+        if gm is None:
+            gm = self._norm_gamemode(base.gamemode)
         r = RconSettings()
         r.enable = self.rcon.enable if self.rcon.enable is not None else base.rcon.enable
         r.port = self.rcon.port if self.rcon.port is not None else base.rcon.port
         r.password = self.rcon.password if self.rcon.password not in (None, "") else base.rcon.password
         r.address = self.rcon.address if self.rcon.address not in (None, "") else base.rcon.address
         tpl = self.start_command_template if self.start_command_template is not None else base.start_command_template
-        return ServerSettings(port=port, rcon=r, start_command_template=tpl)
+        return ServerSettings(port=port, gamemode=gm, rcon=r, start_command_template=tpl)
 
 
 @dataclass
@@ -199,8 +227,12 @@ def _parse_server(raw: Any) -> ServerSettings:
         password=str(rcon_raw["password"]) if "password" in rcon_raw and rcon_raw["password"] not in (None, "") else None,
         address=str(rcon_raw["address"]) if "address" in rcon_raw and rcon_raw["address"] else None,
     )
+    gm = None
+    if "gamemode" in raw and raw["gamemode"] not in (None, ""):
+        gm = ServerSettings._norm_gamemode(raw["gamemode"])
     return ServerSettings(
         port=int(port) if port is not None else None,
+        gamemode=gm,
         rcon=rcon,
         start_command_template=(
             str(raw["start_command_template"])

@@ -8,7 +8,8 @@
   status [--version V]                            查看各实例部署状态与启动指引
   start  [--version V] [--update]                 前台透传运行 MCDR（等同进目录跑）；
                                                   --update: 先就地刷新启动命令/端口（不同端口，同步配置变更）再启动
-  set-ports [--group ID] [--version V]            改端口/RCON（部署后冷改，配置+命令行）
+  configure-server [--group ID] [--version V]     把 server 块属性（端口/游戏模式/RCON）配置到已部署实例（冷改）
+                                                  （别名：set-ports / set-server，均可直接用）
 
 启动服务器：工具不托管进程，deploy 后在实例目录生成 start.bat/start.sh，
 双击或 `mcserver start --version X` 前台运行 MCDR 交互控制台。
@@ -154,9 +155,10 @@ def _iter_targets(cfg, args) -> list[tuple]:
     return [(g, v) for g in cfg.groups for v in g.instances]
 
 
-def cmd_set_ports(cfg, args) -> int:
-    """修改端口 / RCON 设置（部署后冷改，也可在 deploy 后补应用）。
+def cmd_configure_server(cfg, args) -> int:
+    """把 server 块属性（端口 / 游戏模式 / RCON）配置到实例（部署后冷改）。
 
+    子命令 configure-server（别名 set-ports / set-server）。
     数据来源：配置里的 server 块 + 命令行参数覆盖（命令行优先）。
     """
     from .config import RconSettings, ServerSettings
@@ -169,6 +171,8 @@ def cmd_set_ports(cfg, args) -> int:
     rcon_over = RconSettings()
     if args.port is not None:
         over.port = args.port
+    if args.gamemode:
+        over.gamemode = args.gamemode
     if args.rcon_port is not None:
         rcon_over.port = args.rcon_port
     if args.rcon_password:
@@ -188,7 +192,7 @@ def cmd_set_ports(cfg, args) -> int:
         # 应用到已部署实例（无 server.properties/config.yml 会提示跳过）
         mcdr_mod.write_server_settings(ver, final)
         changed += 1
-    print(f"已对 {changed} 个实例应用端口/RCON 设置")
+    print(f"已对 {changed} 个实例应用端口/游戏模式/RCON 设置")
     return 0
 
 
@@ -245,18 +249,24 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_start)
 
     sp = sub.add_parser(
-        "set-ports",
-        help="修改端口/RCON（冷改，部署后也可用）。值来自配置 server 块 + 命令行覆盖",
+        "configure-server",
+        aliases=["set-ports", "set-server"],
+        help="把 server 块属性（端口/游戏模式/RCON）配置到实例（冷改，部署后也可用）。"
+        "值来自配置 server 块 + 命令行覆盖。别名 set-ports / set-server 同样可用",
     )
     sp.add_argument("--config", dest="config_dup", help=argparse.SUPPRESS)
     add_target(sp)
     sp.add_argument("--port", type=int, help="游戏端口（覆盖配置）")
+    sp.add_argument(
+        "--gamemode",
+        help="游戏模式（覆盖配置）：survival/creative/adventure/spectator（或 0-3）",
+    )
     sp.add_argument("--rcon-enable", dest="rcon_enable", action="store_true", help="启用 RCON")
     sp.add_argument("--rcon-disable", dest="rcon_disable", action="store_true", help="禁用 RCON")
     sp.add_argument("--rcon-port", dest="rcon_port", type=int, help="RCON 端口（覆盖配置）")
     sp.add_argument("--rcon-password", dest="rcon_password", help="RCON 密码（覆盖配置）")
     sp.add_argument("--rcon-address", dest="rcon_address", help="RCON 地址（默认 127.0.0.1）")
-    sp.set_defaults(func=cmd_set_ports)
+    sp.set_defaults(func=cmd_configure_server)
 
     return p
 

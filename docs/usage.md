@@ -111,21 +111,26 @@ MCDR 控制台常用命令：`!!MCDR status`、`!!MCDR server stop_exit`（停�
 3. 在 MCDR 控制台执行 `/reload` 重新加载数据包
 4. 修改数据包后再次 `/reload` 即可迭代测试
 
-## 修改端口 / RCON（部署后冷改）
+## 修改端口 / 游戏模式 / RCON（部署后冷改）
+
+把配置 `server` 块的属性配置到实例用 `configure-server`（旧名 `set-ports`、`set-server` 仍可用）：
 
 ```powershell
 # 按配置文件的 server 块应用到全部实例
-.\venv\Scripts\python.exe mcserver.py set-ports
+.\venv\Scripts\python.exe mcserver.py configure-server
 
 # 单个实例 + 命令行覆盖（不写配置）
-.\venv\Scripts\python.exe mcserver.py set-ports --version 1.20.1 --port 25566
-.\venv\Scripts\python.exe mcserver.py set-ports --version 1.20.1 --rcon-enable --rcon-port 25576 --rcon-password test123
+.\venv\Scripts\python.exe mcserver.py configure-server --version 1.20.1 --port 25566
+.\venv\Scripts\python.exe mcserver.py configure-server --version 1.20.1 --gamemode survival   # 改游戏模式
+.\venv\Scripts\python.exe mcserver.py configure-server --version 1.20.1 --rcon-enable --rcon-port 25576 --rcon-password test123
 
 # 禁用 RCON / 恢复默认
-.\venv\Scripts\python.exe mcserver.py set-ports --version 1.20.1 --rcon-disable
+.\venv\Scripts\python.exe mcserver.py configure-server --version 1.20.1 --rcon-disable
 ```
 
-修改即时落盘（同时更新 `server.properties` 与 MCDR `config.yml` 保持一致），重启服务端后生效。
+`--gamemode` 取值：`survival`/`creative`/`adventure`/`spectator`（或 0-3）。
+修改即时落盘（同时更新 `server.properties` 与 MCDR `config.yml` 保持一致），
+重启服务端后生效。不传任何覆盖参数时，按当前配置文件把全部实例同步到一致状态。
 
 ## 查看状态
 
@@ -145,11 +150,11 @@ fabric server jar 首次自举（下载 vanilla server 与依赖），一次性�
 把组的 `mods` 留空即可，仍是 fabric（=vanilla 兼容）服务端。
 
 **多实例端口冲突？**
-一次只开一个实例时无需处理；换端口用 `set-ports --version X --port 新端口`。
+一次只开一个实例时无需处理；换端口用 `configure-server --version X --port 新端口`。
 
 **RCON 连不上？**
 确认 `enable-rcon=true` 且 `rcon.password` 非空。用
-`set-ports --rcon-enable --rcon-password xxx` 会自动保持两侧一致。
+`configure-server --rcon-enable --rcon-password xxx` 会自动保持两侧一致。
 
 **报"要求 Java X 但本机只有 Y"？**
 该 MC 版本需要 Java X，但本机没有。装对应 JDK / 设 JAVA_HOME，或在

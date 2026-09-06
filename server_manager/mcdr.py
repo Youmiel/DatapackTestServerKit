@@ -157,9 +157,9 @@ def _set_properties_values(lines: list[str], updates: dict[str, str]) -> list[st
 def write_server_settings(
     mc_version: str, server_cfg: "ServerSettings", mcdr_cfg: dict | None = None
 ) -> None:
-    """把端口与 RCON 设置写入 server.properties，并同步 MCDR config.yml 的 rcon 段。
+    """把端口 / 游戏模式 / RCON 设置写入 server.properties，并同步 MCDR config.yml 的 rcon 段。
 
-    - server.properties：server-port、enable-rcon、rcon.port、rcon.password（读改写）
+    - server.properties：server-port、gamemode、enable-rcon、rcon.port、rcon.password（读改写）
     - MCDR config.yml   ：rcon.enable / rcon.port / rcon.password / rcon.address
       （MCDR 作为 RCON 客户端，需与 server.properties 一致）
 
@@ -178,6 +178,7 @@ def write_server_settings(
     if sp.exists():
         updates = {
             "server-port": str(eff.port),
+            "gamemode": str(eff.gamemode),
             "enable-rcon": "true" if r.enable else "false",
             "rcon.port": str(r.port),
         }
@@ -186,7 +187,10 @@ def write_server_settings(
         lines = sp.read_text(encoding="utf-8").splitlines()
         new_lines = _set_properties_values(lines, updates)
         sp.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
-        print(f"[{mc_version}] server.properties: port={eff.port}, rcon={r.enable}")
+        print(
+            f"[{mc_version}] server.properties: port={eff.port}, "
+            f"gamemode={eff.gamemode}, rcon={r.enable}"
+        )
     else:
         print(f"[{mc_version}] 跳过：server.properties 不存在（先 deploy）")
 

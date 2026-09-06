@@ -73,10 +73,17 @@ mcdr:
   language: "zh_cn"
 
 # -----------------------------------------------------------------------------
-#  服务器端口 / RCON 设置（可选）
+#  服务器端口 / 游戏模式 / RCON 设置（可选）
 #  -----------------------------------------------------------------------------
-#  游戏端口与 RCON 的统一配置。部署（deploy）时自动应用；部署完后也可随时用
-#  `mcserver set-ports` 冷修改（不重启服务端也能改，重启后生效）。
+#  游戏端口、默认游戏模式与 RCON 的统一配置。部署（deploy）时自动应用；部署完
+#  后也可随时用 `mcserver configure-server`（旧名 set-ports 仍可用）冷修改（不
+#  重启服务端也能改，重启后生效）。
+#
+#  游戏模式 gamemode：写入 server.properties 的 gamemode。
+#    MC 默认是 survival（生存），但本工具用于**测试数据包**，故**默认 creative**
+#    （创造，方便搭环境/看效果）。想改可：
+#      - 顶层这里改成其它值（survival/creative/adventure/spectator 或 0-3）
+#      - 或只在某组下加同级 server: 块覆盖（组内所有实例生效）
 #
 #  RCON 需要同时配置两侧并保持一致：
 #    - MC 服务端：server.properties 的 enable-rcon / rcon.port / rcon.password
@@ -88,6 +95,8 @@ mcdr:
 server:
   # 游戏端口（server-port）
   port: 25565
+  # 默认游戏模式（gamemode）：survival/creative/adventure/spectator（或 0-3）
+  gamemode: creative
   rcon:
     enable: false          # 是否启用 RCON
     port: 25575            # RCON 端口

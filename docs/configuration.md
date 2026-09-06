@@ -64,11 +64,12 @@ network:
 
 ---
 
-## server — 端口 / RCON / 启动命令
+## server — 端口 / 游戏模式 / RCON / 启动命令
 
 ```yaml
 server:
   port: 25565              # 游戏端口（server-port）
+  gamemode: creative       # 默认游戏模式（survival/creative/adventure/spectator 或 0-3）
   rcon:
     enable: false          # 是否启用 RCON
     port: 25575            # RCON 端口
@@ -77,11 +78,20 @@ server:
   start_command_template: ""   # 自定义启动命令（可选）
 ```
 
+### 游戏模式 gamemode
+
+写 `server.properties` 的 `gamemode`。MC 默认是 `survival`（生存），但本工具用于
+**测试数据包**，因此**未配置时默认 `creative`**（创造，方便搭环境/验证效果）。
+
+- 顶层 `server.gamemode` 配全局默认；组级 `server:` 块可覆盖（只影响该组）。
+- 合法值：`survival` / `creative` / `adventure` / `spectator`（也接受数字 0-3）。
+- 部署后冷改：`mcserver configure-server --version X --gamemode survival`（见 usage；旧名 set-ports 也可用）。
+
 ### 端口 / RCON
 
 - `deploy` 时自动应用（写 `server.properties` + 同步 MCDR `config.yml` 的 rcon 段）。
 - RCON 需**两侧一致**（MC 服务端与 MCDR 客户端），工具自动保持同步。
-- 部署后可用 `mcserver set-ports` 冷修改（见 usage），改后重启服务端生效。
+- 部署后可用 `mcserver configure-server` 冷修改（见 usage），改后重启服务端生效。
 
 ### 自定义启动命令（内存 / JVM 参数）
 
