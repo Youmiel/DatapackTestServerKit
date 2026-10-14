@@ -1,5 +1,8 @@
 # Minecraft 多版本测试服务器部署工具
 
+> ⚠ 本项目完全靠 AI 编写，请小心使用。
+> ⚠ This project is fully vibe coded, please use with caution.
+
 用 Python 编写的跨版本 Minecraft 服务器部署工具，用于**测试数据包（datapack）**。
 为不同 MC 版本自动装配 **Fabric 服务端 + Fabric mod（Modrinth/CurseForge）+ MCDR 及插件**，
 产出"进目录就能启动"的完整测试环境。
