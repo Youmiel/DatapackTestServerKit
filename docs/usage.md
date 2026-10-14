@@ -22,11 +22,15 @@ java:
   launcher_roots:
     - "C:/Program Files (x86)/Minecraft Launcher/runtime"   # 留空则用 JAVA_HOME/PATH
 
+plugins:                       # 全局插件（可选，所有组共用；组级可覆盖/禁用/追加）
+  - id: quick_backup_multi
+    url: "https://github.com/TISUnion/QuickBackupM/releases/download/v1.10.1/QuickBackupM-v1.10.1.mcdr"
+
 version_groups:
   - id: "1.21"
     instances: ["1.21.1", "1.21.4"]
     mods: []
-    plugins: []
+    # plugins: []              # 组级差异（可省略）
 ```
 
 各配置块详细说明见 **[docs/configuration.md](configuration.md)**。
@@ -42,28 +46,46 @@ version_groups:
 .\venv\Scripts\python.exe mcserver.py deploy --version 1.21.1 --force   # 强制重下全部并覆盖
 ```
 
-deploy 做的事：探测 Java → 下载 fabric server jar → 初始化 MCDR 实例目录 → 生成
-`config.yml`/`eula.txt`/`server.properties`（应用端口/RCON/启动命令）→ 下载 mod 到
-`mods/` → 下载插件到 `plugins/` → 生成 `start.bat`。
+deploy 做的事：探测 Java → 共享 fabric 依赖库（目录链接）→ 下载 fabric server jar →
+初始化 MCDR 实例目录 → 生成 `config.yml`/`eula.txt`/`server.properties`（应用
+端口/RCON/启动命令）→ 装 mod（共享缓存 → `mods/`）→ 装插件（共享缓存 →
+`plugins/`）→ 生成 `start.bat` → 记录 `.deploy-meta.json`。
 
-**插件共享缓存**：MCDR 插件跨 MC 版本通用，下载统一先进 `.cache/plugins/`
-（同一 URL 只网络下载一次），再复制到各实例 `plugins/` —— 多版本部署同一插件
-不重复下载。首次某个版本部署时显示“下载 插件 → 缓存”，后续其它版本部署显示
-“插件缓存命中，复制”。
+**共享缓存**（项目根 `.cache/`，跨实例/跨组复用，详见
+[configuration.md](configuration.md#下载缓存与资源复用)）：
 
-### deploy 默认是"幂等补齐"（断点继续 / 自动补齐）
+| 目录 | 内容 | 复用方式 |
+| --- | --- | --- |
+| `.cache/mods/` | fabric mod | 按文件名共享，实例复制（同 `lithium` 在多组只下一次） |
+| `.cache/plugins/` | MCDR 插件 | 按文件名共享，实例复制（插件跨 MC 版本通用） |
+| `.cache/libraries/` | fabric 依赖库 | 各实例 `server/libraries` **目录链接**至此 |
+| `.cache/mojang_java/` | 各 MC 版本 Java 要求 | 24h TTL 缓存 |
 
-- 已有且非空的 jar / mod / 插件**自动跳过**，只下载缺失的 —— 部署中途断网/中断后
-  重跑同一条命令即可**从断点继续**，不会重复下载。
-- 配置里**新增了 mod / 插件**后重跑 `deploy`，会自动把新文件补齐进既有实例
-  （旧文件不删除，多余的手动清理即可）。
+### deploy 默认是“幂等补齐”（断点继续 / 自动补齐 / 失效自动更新）
+
+判定**不需要先下载**（依据见 configuration.md 的“下载缓存与资源复用”）：
+
+- mod：用 API 给出的 sha1 在本地重算比对；
+- MCDR 插件：用 HTTP 指纹（HEAD：ETag/Last-Modified/Content-Length）与记录比对；
+- fabric server jar：用元数据记录的 loader/installer 版本比对。
+
+由此：
+
+- 未变的资源**自动跳过**，缺失的补齐，**同名文件内容/版本变了会自动重下覆盖**；
+  部署中途断网/中断后重跑同一条命令即可**从断点继续**。
+- 无网时插件指纹探测不到 → 沿用缓存并提示，**不阻塞部署**。
+- 配置里**新增了 mod / 插件**后重跑 `deploy`，会自动把新文件补齐进既有实例。
 - 下载失败会按 `network.download_retries`（默认 3）自动重试，仍失败才报错中断，
   此时可修复网络后重跑（断点继续）。
+
+> 只有**同名**文件会被更新。同一 mod 换了文件名的旧版本（如
+> `fabric-api-0.145.4.jar` → `fabric-api-0.155.2.jar`）不会被自动删除，
+> 请手动清理，否则 Fabric 会因重复 mod 报错。
 
 ### `deploy --force` 强制重新部署
 
 `--force` 会**无条件重下** jar / mod / 插件并覆盖已有文件（用于强制拉取最新版本、
-  loader 等），同时刷新 `.cache/plugins/` 里的插件共享缓存。
+  loader 等），同时刷新 `.cache/plugins/`、`.cache/mods/` 的缓存与指纹记录。
 注意：只覆盖配置里仍存在的文件，**不会**删除配置中已移除的旧 mod/插件残留。
 
 ## 启动
@@ -101,8 +123,12 @@ mod），用：
 MCDR 控制台常用命令：`!!MCDR status`、`!!MCDR server stop_exit`（停服并退出）、`!!MCDR exit`。
 也可直接 `Ctrl+C`。
 
-> 首次启动 fabric server 会联网下载 vanilla server + loader 依赖并解压，耗时较长
+> 首次启动 fabric server 会联网下载 vanilla server 与 loader 依赖并解压，耗时较长
 > （一次性），之后启动很快。若提示接受 EULA，工具已在部署时写好 `eula.txt=true`。
+>
+> 注意：`libraries/` 虽已由工具链接到共享缓存（省磁盘），但 fabric 的自举逻辑不检查
+> 已有库、会全量重下一次（写入仍落进共享缓存）。所以共享**只能省磁盘**，省不了首次
+> 启动的那次下载耗时。mod / 插件则真的只下载一次（落在项目 `.cache/` 内）。
 
 ## 测试数据包
 
@@ -139,7 +165,8 @@ MCDR 控制台常用命令：`!!MCDR status`、`!!MCDR server stop_exit`（停�
 .\venv\Scripts\python.exe mcserver.py status --version 1.21.1
 ```
 
-`status` 展示是否已部署及启动方式（工具不托管进程，故不显示运行中/停止）。
+`status` 展示是否已部署、`libraries` 是否已共享，以及启动方式
+（工具不托管进程，故不显示运行中/停止）。
 
 ## 常见问题
 

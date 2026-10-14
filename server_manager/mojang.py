@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .http_util import DownloadError
-from .paths import CACHE_ROOT
+from .paths import MOJANG_CACHE_ROOT
 
 MANIFEST_URL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
 CACHE_TTL = 24 * 3600  # 秒
@@ -34,7 +34,7 @@ class JavaRequirement:
 
 
 def _cache_path(mc_version: str) -> Path:
-    return CACHE_ROOT / "mojang_java" / f"{mc_version}.json"
+    return MOJANG_CACHE_ROOT / f"{mc_version}.json"
 
 
 def _read_cache(mc_version: str) -> JavaRequirement | None:

@@ -3,7 +3,8 @@
 子命令：
   deploy [--group ID] [--version V] [--dry-run] [--force]  部署（下载 fabric/mod/插件、生成配置）
                                                               --force: 强制重下全部（覆盖已有）
-                                                              默认幂等/补齐：已有跳过、缺失下载（断点续部署）
+                                                              默认幂等/补齐：按 mod sha1 / 插件 HTTP 指纹 /
+                                                              fabric loader 版本判定失效，未变的跳过
   list                                            列出配置中的版本组与实例
   status [--version V]                            查看各实例部署状态与启动指引
   start  [--version V] [--update]                 前台透传运行 MCDR（等同进目录跑）；
@@ -64,20 +65,29 @@ def cmd_deploy(cfg, args) -> int:
 
 def cmd_list(cfg, args) -> int:
     print("配置的版本组：")
+    if cfg.plugins:
+        print(f"  全局插件（默认所有组共用，组级可覆盖/禁用）：{len(cfg.plugins)} 个")
+        for p in cfg.plugins:
+            print(f"        - {p.id}  {p.url}")
     for g in cfg.groups:
-        mods_n = len(g.mods)
-        plg_n = len(g.plugins)
+        eff_plugins = cfg.effective_plugins(g)
+        group_ids = {p.id for p in g.plugins}
         print(f"  组 {g.id}: {', '.join(g.instances)}")
-        print(f"      mods={mods_n} 插件={plg_n}  Java偏好={g.java.preferred_major}")
+        print(
+            f"      mods={len(g.mods)} 插件={len(eff_plugins)}  "
+            f"Java偏好={g.java.preferred_major}"
+        )
         for m in g.mods:
             print(f"        - [{m.source}] {m.id}")
-        for p in g.plugins:
-            print(f"        - 插件 {p.id}  {p.url}")
+        for p in eff_plugins:
+            origin = "组级" if p.id in group_ids else "全局"
+            print(f"        - 插件[{origin}] {p.id}  {p.url}")
     return 0
 
 
 def cmd_status(cfg, args) -> int:
     """展示各实例部署情况与启动指引（工具不托管进程，无法探测运行态）。"""
+    from . import libraries
     from .paths import instance_paths
 
     target_list: list[tuple] = []
@@ -97,6 +107,8 @@ def cmd_status(cfg, args) -> int:
         state = "已部署" if deployed else "未部署"
         print(f"  {ver:12} {state}")
         if deployed:
+            shared = "已共享" if libraries.is_link_like(p["libraries"]) else "独立"
+            print(f"             libraries: {shared}")
             print(f"             启动: 双击 {p['root'] / 'start.bat'} 或 "
                   f"`mcserver start --version {ver}`")
         else:

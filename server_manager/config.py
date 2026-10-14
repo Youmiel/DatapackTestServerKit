@@ -130,6 +130,8 @@ class ModSpec:
 class PluginSpec:
     id: str
     url: str = ""
+    # 顶层全局插件可在组级被裁剪：disabled: true 即从该组结果中排除
+    disabled: bool = False
 
 
 @dataclass
@@ -153,12 +155,44 @@ class RootConfig:
     mcdr: dict
     server: ServerSettings
     groups: list[InstanceGroup]
+    # 顶层 plugins = 全局默认插件列表（组级可覆盖/追加/禁用）
+    plugins: list[PluginSpec] = field(default_factory=list)
 
     def find_group(self, group_id: str) -> InstanceGroup:
         for g in self.groups:
             if g.id == group_id:
                 return g
         raise ConfigError(f"未找到版本组: {group_id}")
+
+    def effective_plugins(self, group: InstanceGroup) -> list[PluginSpec]:
+        """合并顶层 plugins（全局默认）与组级 plugins。
+
+        规则（按出现顺序、保留首次出现的次序）：
+          - 组级同 id → 覆盖（可改 url；未写 url 则沿用全局 url）
+          - 组级新 id → 追加
+          - 任一层标 disabled: true → 从结果中排除（用于裁剪全局默认）
+        """
+        merged: dict[str, PluginSpec] = {}
+        order: list[str] = []
+        for spec in (*self.plugins, *group.plugins):
+            prev = merged.get(spec.id)
+            if prev is None:
+                order.append(spec.id)
+                merged[spec.id] = spec
+            else:
+                merged[spec.id] = PluginSpec(
+                    id=spec.id,
+                    url=spec.url or prev.url,
+                    disabled=spec.disabled,
+                )
+        result = [merged[i] for i in order if not merged[i].disabled]
+        for spec in result:
+            if not spec.url:
+                raise ConfigError(
+                    f"组 {group.id} 的插件 {spec.id} 没有 url，且顶层 plugins 中"
+                    f"也没有同名项可供继承"
+                )
+        return result
 
     def effective_java(self, group: InstanceGroup) -> JavaConfig:
         """合并顶层 java 默认与组级 java 覆盖。
@@ -280,7 +314,13 @@ def _parse_mods(raw: Any) -> list[ModSpec]:
     return out
 
 
-def _parse_plugins(raw: Any) -> list[PluginSpec]:
+def _parse_plugins(raw: Any, require_url: bool = True) -> list[PluginSpec]:
+    """解析插件列表。
+
+    require_url=True（顶层全局 plugins）：每条必须自带 url。
+    require_url=False（组级 plugins）：允许只写 id，url 留空表示“沿用顶层同名插件”；
+    最终 url 非空与否在 effective_plugins() 合并后校验。
+    """
     out: list[PluginSpec] = []
     for item in raw or []:
         if isinstance(item, str):
@@ -289,11 +329,15 @@ def _parse_plugins(raw: Any) -> list[PluginSpec]:
         if isinstance(item, dict):
             if "id" not in item:
                 raise ConfigError(f"插件条目缺少 id: {item!r}")
-            if not item.get("url"):
+            disabled = bool(item.get("disabled", False))
+            url = str(item.get("url") or "")
+            if require_url and not disabled and not url:
                 raise ConfigError(
                     f"插件 {item.get('id')} 未提供 url（当前采用显式 URL 方式安装插件）"
                 )
-            out.append(PluginSpec(id=str(item["id"]), url=str(item["url"])))
+            out.append(
+                PluginSpec(id=str(item["id"]), url=url, disabled=disabled)
+            )
             continue
         raise ConfigError(f"插件条目格式错误: {item!r}")
     return out
@@ -313,7 +357,7 @@ def _parse_groups(raw: Any) -> list[InstanceGroup]:
                 id=gid,
                 instances=[str(x) for x in inst],
                 mods=_parse_mods(item.get("mods")),
-                plugins=_parse_plugins(item.get("plugins")),
+                plugins=_parse_plugins(item.get("plugins"), require_url=False),
                 java=_parse_java(item.get("java")),
                 server=_parse_server(item.get("server")),
             )
@@ -364,6 +408,7 @@ def load_config(path: str | Path | None = None) -> RootConfig:
         mcdr=mcdr,
         server=_parse_server(data.get("server")),
         groups=_parse_groups(data.get("version_groups")),
+        plugins=_parse_plugins(data.get("plugins")),
     )
     if not root.groups:
         raise ConfigError("version_groups 为空，请在配置里至少定义一个版本组")

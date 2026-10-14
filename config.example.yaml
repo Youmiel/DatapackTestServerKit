@@ -39,7 +39,12 @@ network:
   timeout: 60
   # 可选：代理，如 http://127.0.0.1:7890 （留空则直连）
   proxy: ""
-  # 可选：是否校验下载文件的 SHA1（Modrinth 提供）；默认 true
+  # 是否做“内容校验”（默认 true）。开启时会：
+  #   - mod：用 Modrinth/CurseForge 给出的 sha1 校验下载结果；复用共享缓存或
+  #          实例已有文件时本地重算 sha1 比对（不联网）
+  #   - MCDR 插件：用 HTTP HEAD 取 ETag/Last-Modified/Content-Length 与记录比对，
+  #          判断共享缓存是否失效（不下载内容）；探测不到时沿用缓存、不阻塞部署
+  # 关闭后退化为“文件存在且非空即复用”。
   verify_sha1: true
   # 每个请求/下载失败的**整体重试次数**（含首次），默认 3 = 失败后重试 2 次。
   # 连接层对 5xx/429 会先自动重试；此处兜底断流/超时等整体失败，并间隔退避。
@@ -117,22 +122,47 @@ server:
   start_command_template: ""
 
 # -----------------------------------------------------------------------------
+#  MCDR 插件（全局默认，可选）
+#  -----------------------------------------------------------------------------
+#  所有组默认共用的 MCDR 插件。组级 plugins 与之**合并**（规则见下），
+#  因此通用插件（如备份插件）只需在这里写一次，不必每组重复。
+#
+#  字段：
+#    id  : 插件标识（仅展示/记录用）
+#    url : 插件文件直链（GitHub release asset 等）
+#  插件官方目录 https://mcdreforged.com/en/plugins 可查各插件 release 直链。
+#
+#  默认留空；需要时按下面示例填：
+plugins: []
+# plugins:
+#   - id: quick_backup_multi
+#     url: "https://github.com/TISUnion/QuickBackupM/releases/download/v1.10.1/QuickBackupM-v1.10.1.mcdr"
+
+# -----------------------------------------------------------------------------
 #  服务器版本组（核心配置）
 #  -----------------------------------------------------------------------------
-#  每个组 = 一个大版本线，组内共享：mod 列表、MCDR 插件列表、Java 要求。
+#  每个组 = 一个大版本线，组内共享：mod 列表、Java 要求（插件见上方顶层 plugins）。
 #  组下的 instances 列出要部署的具体小版本 —— 每个小版本生成一个独立服务器。
 #  「版本数量可通过增删 instances 或整个组来调整」。
 #
 #  目录布局（每个小版本实例一个目录，均为自包含 MCDR 根）：
 #    servers/<版本>/
-#      config.yml           <- MCDR 配置（自动生成，exec 模式启动 java）
-#      plugins/             <- MCDR 插件（显式 URL 下载）
-#      start.bat / start.sh <- 一键前台启动 MCDR
-#      server/              <- MCDR working_directory（服务器文件）
+#      config.yml            <- MCDR 配置（自动生成，exec 模式启动 java）
+#      .deploy-meta.json     <- 工具记录的部署元数据（loader 版本 / mod sha1）
+#      plugins/              <- MCDR 插件（显式 URL 下载）
+#      start.bat / start.sh  <- 一键前台启动 MCDR
+#      server/               <- MCDR working_directory（服务器文件）
 #        minecraft_server.jar  <- fabric server jar（含 loader，可直接启动）
 #        mods/                 <- fabric mod（来自 Modrinth/CurseForge）
+#        libraries/            <- fabric 依赖库（默认链接到 .cache/libraries 共享）
 #        server.properties / eula.txt / world/  <- 首次启动自动生成
 #        world/datapacks/      <- 你手动放数据包的地方
+#
+#  跨实例共享缓存 .cache/（详见 docs/configuration.md）：
+#    plugins/       MCDR 插件（一次下载，多实例复制）
+#    mods/          fabric mod（按文件名共享，跨组复用）
+#    libraries/     fabric 依赖库（各实例 server/libraries 链接至此，省磁盘）
+#    mojang_java/   各 MC 版本 Java 要求（24h TTL）
 # =============================================================================
 version_groups:
   # ---------------------------------------------------------------
@@ -152,11 +182,11 @@ version_groups:
     #   version: 可选。留空 = 自动选该 MC 版本下最新 fabric 兼容版
     #            Modrinth 可用 version_id 锁定；CurseForge 可用 fileId 锁定
     mods: []
-    # 本组所有实例要安装的 MCDR 插件（可留空）
-    #   id : 插件标识（仅作展示/记录）
-    #   url: 插件文件直链（GitHub release asset 等）。
-    # 插件跨 MC 版本通用，下载统一进共享缓存 .cache/plugins/（一次网络下载），
-    # 之后各实例部署直接从缓存复制到自身 plugins/ —— 多版本不重复下载。
+    # 本组独有的 MCDR 插件（可留空）。通用插件建议写在上方顶层 plugins，
+    # 这里只写差异（合并规则）：
+    #   - 覆盖全局插件：只写 id（沿用全局 url）或 id + url（换源）
+    #   - 排除全局插件：{id: 插件id, disabled: true}
+    #   - 追加本组插件：新 id + url
     plugins: []
 
   # ---------------------------------------------------------------
@@ -175,10 +205,13 @@ version_groups:
     #   - id: some-cf-mod
     #     source: curseforge
     mods: []
-    # --- MCDR 插件示例（显式 URL） ---
+    # --- 组级插件示例（与顶层 plugins 合并）---
     # plugins:
-    #   - id: quick_backup_multi
-    #     url: "https://github.com/TISUnion/QuickBackupM/releases/download/v1.10.1/QuickBackupM-v1.10.1.mcdr"
+    #   - id: quick_backup_multi       # 顶层已有同名 → 覆盖（此处换成别的 release）
+    #     url: "https://github.com/TISUnion/QuickBackupM/releases/download/v1.11.0/QuickBackupM-v1.11.0.mcdr"
+    #   - id: some_other_plugin        # 顶层没有 → 追加为本组独有
+    #     url: "https://example.com/some_other_plugin.mcdr"
+    # 只想排除某个全局插件时：
+    # plugins:
+    #   - {id: quick_backup_multi, disabled: true}
     plugins: []
-
-# 若要预置 quick_backup_multi 到某组，把上面 plugins 示例取消注释并填真实 release URL

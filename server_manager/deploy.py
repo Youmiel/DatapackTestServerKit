@@ -3,22 +3,24 @@
 步骤：
   1. 确保 MCDR 已安装（共享 venv）
   2. 探测 Java（固定）
-  3. 下载 fabric server jar（含 loader，可直接启动）
-  4. 初始化 MCDR 实例目录（init）+ 生成 eula/server.properties
-  5. 写入 MCDR config.yml（exec start_command）
-  6. 下载并安装 fabric mod 到 server/mods/
-  7. 下载 MCDR 插件到 plugins/
+  3. 共享 fabric/loader 依赖库（server/libraries -> .cache/libraries）
+  4. 下载 fabric server jar（含 loader，可直接启动）
+  5. 初始化 MCDR 实例目录（init）+ 生成 eula/server.properties
+  6. 写入 MCDR config.yml（exec start_command）
+  7. 安装 fabric mod（共享缓存 .cache/mods/ -> server/mods/）
+  8. 安装 MCDR 插件（共享缓存 .cache/plugins/ -> plugins/）
+  9. 记录部署元数据（loader 版本 / mod sha1 / 插件指纹）
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import fabric, mcdr, mods, mojang, server as server_mgr
+from . import fabric, libraries, mcdr, metadata, mods, mojang, server as server_mgr
 from .config import InstanceGroup, RootConfig
 from .http_util import build_modrinth_http
 from .java import JavaRuntime, detect_java
-from .paths import instance_paths
+from .paths import PLUGIN_CACHE_ROOT, instance_paths
 
 
 @dataclass
@@ -92,6 +94,29 @@ def _probe_java(cfg: RootConfig, group: InstanceGroup, mc_version: str):
         raise
 
 
+def _jar_need(force: bool, jar_path: Path, prev: dict, artifact) -> tuple[bool, str]:
+    """判断 fabric server jar 是否需重下。返回 (是否重下, 原因)。
+
+    依据实例元数据里记录的 loader / installer 版本：版本变了就重下，
+    不再像以前那样只能靠 --force 盲重下。无元数据的历史实例不重下（仅补记）。
+    """
+    if force:
+        return True, "强制重下"
+    if not (jar_path.exists() and jar_path.stat().st_size > 0):
+        return True, "jar 缺失"
+    if not prev:
+        return False, "无版本记录，沿用现有 jar"
+    if (
+        prev.get("loader") != artifact.loader_version
+        or prev.get("installer") != artifact.installer_version
+    ):
+        return (
+            True,
+            f"loader {prev.get('loader')} -> {artifact.loader_version}",
+        )
+    return False, "loader 版本与记录一致"
+
+
 def deploy_instance(
     cfg: RootConfig,
     group: InstanceGroup,
@@ -103,11 +128,14 @@ def deploy_instance(
 
     dry_run=True：只解析/打印要做什么，不落盘。
     force=True：无条件重下 jar/mod/插件（覆盖已有），用于 `--force` 重新部署。
-    默认（force=False）是幂等/补齐式：已有非空文件跳过、缺失才下载 —— 天然
-    支持“部署中断后重跑断点继续”，也适合配置更新后补齐新 mod/插件。
+    默认（force=False）是幂等/补齐式：已有且“不下载即可判定未变”的资源跳过，
+    缺失/变化的才下载 —— 天然支持“部署中断后重跑断点继续”。判定依据：
+      - mod：本地重算 sha1 与 Modrinth/CurseForge 给出的 sha1 比对
+      - 插件：HEAD 取 ETag/Last-Modified/Content-Length 与缓存记录比对
+      - fabric jar：与元数据记录的 loader/installer 版本比对
     """
     paths = instance_paths(mc_version)
-    deploy_tag = f"强制" if force else "补齐"
+    verify = bool(cfg.network.get("verify_sha1", True))
     what = "重新部署" if force else "部署/补齐"
 
     # 0. Java 探测（固定路径）
@@ -119,13 +147,16 @@ def deploy_instance(
         mcdr.ensure_mcdr_installed(cfg)
         sync_instance_files(cfg, group, mc_version, java=java)
 
-    # 2. fabric server jar
+    # 2. fabric/loader 依赖库共享（junction/symlink；旧实例自动迁移为共享）
+    libraries.ensure_shared(mc_version, dry_run=dry_run)
+
+    # 3. fabric server jar（按元数据记录的 loader/installer 版本判定是否重下）
     http = build_modrinth_http(cfg.modrinth, cfg.network)
     artifact = fabric.resolve_server_jar_url(http, mc_version)
     jar_path = paths["jar"]
-    jar_needed = force or not (
-        jar_path.exists() and jar_path.stat().st_size > 0
-    )
+    meta = metadata.read_deploy_meta(mc_version)
+    prev_fabric = meta.get("fabric") if isinstance(meta.get("fabric"), dict) else {}
+    jar_needed, jar_why = _jar_need(force, jar_path, prev_fabric, artifact)
     if dry_run:
         print(
             f"[deploy {mc_version}] 解析 fabric server jar (loader {artifact.loader_version}, "
@@ -135,36 +166,56 @@ def deploy_instance(
         paths["server_root"].mkdir(parents=True, exist_ok=True)
         print(
             f"[deploy {mc_version}] {what} fabric server jar "
-            f"(loader {artifact.loader_version})"
+            f"(loader {artifact.loader_version}；{jar_why})"
         )
-        fabric.download_server_jar(http, artifact, jar_path, force=force)
+        fabric.download_server_jar(http, artifact, jar_path, force=True)
         print(f"[deploy {mc_version}] 服务器 jar -> {jar_path}")
     else:
-        print(f"[deploy {mc_version}] 服务器 jar 已存在，跳过")
+        print(f"[deploy {mc_version}] 服务器 jar 已存在，跳过（{jar_why}）")
 
-    # 3. mod
+    # 4. mod（共享缓存 .cache/mods/ -> 实例 server/mods/）
     resolved_mods = mods.resolve_mods(group.mods, mc_version, cfg, dry_run=dry_run)
     mod_files: list[Path] = []
     for rm in resolved_mods:
         if dry_run:
             print(f"[deploy {mc_version}] 解析 mod {rm.filename} ({rm.version_label})")
             continue
-        target = paths["mods"] / rm.filename
-        if not force and target.exists() and target.stat().st_size > 0:
-            print(f"[deploy {mc_version}] mod 已存在，跳过: {rm.filename}")
-            mod_files.append(target)
-            continue
-        print(f"[deploy {mc_version}] {deploy_tag}下载 mod {rm.filename} ({rm.version_label})")
-        mod_files.append(mods.download_mod(rm, paths["mods"], cfg, force=force))
+        target, status = mods.install_mod(
+            rm, paths["mods"], cfg, force=force, verify=verify
+        )
+        print(f"[deploy {mc_version}] mod {rm.filename}: {status}")
+        mod_files.append(target)
 
-    # 4. MCDR 插件（下载进 .cache/plugins/ 共享缓存，再复制到实例）
+    # 5. MCDR 插件（顶层全局 plugins + 组级覆盖；共享缓存 -> 实例 plugins/）
+    plugin_specs = cfg.effective_plugins(group)
     plugin_files: list[Path] = []
-    for spec in group.plugins:
-        if dry_run:
+    if dry_run:
+        for spec in plugin_specs:
             print(f"[deploy {mc_version}] 解析 插件 {spec.id} <- {spec.url}")
-            continue
-        installed = mcdr.install_plugins(mc_version, [spec], http, force=force)
-        plugin_files.extend(installed)
+    else:
+        plugin_files = mcdr.install_plugins(
+            mc_version, plugin_specs, http, force=force, verify=verify
+        )
+
+    # 6. 记录部署元数据（loader 版本 / mod sha1 / 插件来源指纹）
+    if not dry_run:
+        meta["fabric"] = {
+            "loader": artifact.loader_version,
+            "installer": artifact.installer_version,
+            "filename": artifact.filename,
+        }
+        meta["mods"] = {
+            rm.filename: {"sha1": (rm.sha1 or "").lower(), "version": rm.version_label}
+            for rm in resolved_mods
+        }
+        plugin_index = metadata.load_cache_index(PLUGIN_CACHE_ROOT)
+        meta["plugins"] = {
+            p.name: plugin_index[p.name]
+            for p in plugin_files
+            if isinstance(plugin_index.get(p.name), dict)
+        }
+        meta["libraries_shared"] = libraries.is_link_like(paths["libraries"])
+        metadata.write_deploy_meta(mc_version, meta)
 
     return DeployResult(
         mc_version=mc_version,

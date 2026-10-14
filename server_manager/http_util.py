@@ -18,6 +18,38 @@ class DownloadError(Exception):
     pass
 
 
+def sha1_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    """计算本地文件 SHA1（小写十六进制）。读取失败返回空串。
+
+    用途：不联网即可判定已有缓存/实例文件是否与解析出的 sha1 一致。
+    """
+    h = hashlib.sha1()
+    try:
+        with open(path, "rb") as f:
+            while True:
+                block = f.read(chunk_size)
+                if not block:
+                    break
+                h.update(block)
+    except OSError:
+        return ""
+    return h.hexdigest()
+
+
+def _fingerprint_from_headers(headers) -> dict[str, str]:
+    """从响应头提取缓存指纹（ETag / Last-Modified / Content-Length）。"""
+    return {
+        "etag": headers.get("ETag", ""),
+        "last_modified": headers.get("Last-Modified", ""),
+        "content_length": headers.get("Content-Length", ""),
+    }
+
+
+def fingerprint_usable(fp: dict | None) -> bool:
+    """指纹是否可用于比对（三项至少一项非空）。"""
+    return bool(fp) and any(fp.values())
+
+
 class Http:
     """HTTP 客户端。
 
@@ -86,17 +118,24 @@ class Http:
         sha1: str = "",
         progress: ProgressCb | None = None,
         chunk_size: int = 256 * 1024,
+        fingerprint_out: dict | None = None,
     ) -> Path:
-        """下载到 dest。若给了 sha1 则校验；失败按 attempts 重试后抛 DownloadError。"""
+        """下载到 dest。若给了 sha1 则校验；失败按 attempts 重试后抛 DownloadError。
+
+        fingerprint_out：传入 dict 时，成功后会填入本次响应的缓存指纹
+        （etag / last_modified / content_length），供下次部署比对判定失效。
+        """
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_suffix(dest.suffix + ".part")
         last_err: Exception | None = None
         for i in range(self.attempts):
             tmp.unlink(missing_ok=True)
             hasher = hashlib.sha1()
+            headers: dict[str, str] = {}
             try:
                 with self.session.get(url, stream=True, timeout=self.timeout) as r:
                     r.raise_for_status()
+                    headers = _fingerprint_from_headers(r.headers)
                     total = int(r.headers.get("Content-Length") or 0)
                     done = 0
                     with open(tmp, "wb") as f:
@@ -124,11 +163,27 @@ class Http:
                     continue
             if progress:
                 print()  # 结束进度行
+            if fingerprint_out is not None:
+                fingerprint_out.update(headers)
             os.replace(tmp, dest)
             return dest
         raise DownloadError(
             f"下载 {dest.name} 失败（已重试 {self.attempts} 次）: {last_err}"
         ) from last_err
+
+    def head_fingerprint(self, url: str) -> dict | None:
+        """HEAD 探测远端资源指纹，不下载内容。
+
+        返回 etag / last_modified / content_length 三项；无网、服务端不支持
+        HEAD、或三项均为空时返回 None（调用方应降级为“沿用缓存”）。
+        """
+        try:
+            r = self.session.head(url, timeout=self.timeout, allow_redirects=True)
+            r.raise_for_status()
+        except requests.RequestException:
+            return None
+        fp = _fingerprint_from_headers(r.headers)
+        return fp if fingerprint_usable(fp) else None
 
     def _warn(self, url: str, attempt_index: int) -> None:
         """第 attempt_index 次（0 起）失败且还有下次时打印提示。"""

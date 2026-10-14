@@ -6,14 +6,15 @@
 
 ## 特性
 
-- **多版本并行**：按"大版本组"组织，组内共享 mod/插件列表，可展开任意数量小版本（`servers/<版本>/`）
+- **多版本并行**：按“大版本组”组织，组内共享 mod 列表与 Java 要求，可展开任意数量小版本（`servers/<版本>/`）
 - **自动装 Fabric**：官方 meta API 直接下载可启动的 server jar（含 loader，免 installer）
-- **下载自动补齐/断点继续**：deploy 幂等 —— 已有文件跳过、缺失才下载；失败自动重试（`network.download_retries`）
+- **共享缓存**：mod / MCDR 插件 / fabric 依赖库跨版本复用（`.cache/`；libraries 走目录链接，实测 790MB → 243MB）
+- **下载自动补齐/断点继续**：deploy 幂等 —— **不下载即可判定**失效（mod sha1、插件 HTTP 指纹、fabric loader 版本），未变的跳过、缺失/变化才重下；失败自动重试
 - **强制重新部署**：`deploy --force` 无条件重下全部资源并覆盖
 - **同端口更新启动命令**：`start --update` 启动前就地刷新 config.yml 启动命令/端口/start.bat（不下载资源）
 - **统一游戏模式**：测试默认 `creative`（创造），可全局/组级覆盖为 survival 等，`configure-server --gamemode` 可冷改
 - **自动匹配 mod**：mod 按大版本配一次，自动选各小版本兼容版本
-- **MCDR 集成**：每个实例独立运行目录；插件按显式 URL 下载进 `plugins/`
+- **MCDR 集成**：每个实例独立运行目录；插件按显式 URL 下载进 `plugins/`，顶层 `plugins` 配全局默认、组级可覆盖/禁用/追加
 - **Java 自动推断**：按目标 MC 版本查 Mojang 官方数据，自动推断所需 Java 并在官方运行时精确定位（无需人工映射）
 - **数据包就绪**：首次启动自动生成 `world/`，数据包丢进 `server/world/datapacks/` 即可
 - 纯 Python（3.10+），仅依赖 `PyYAML` + `requests`
@@ -27,14 +28,17 @@
 ├── config.example.yaml       # 带详尽注释的示例
 ├── server_manager/           # 工具源码
 ├── docs/                     # 详细文档（配置 / 用法）
+├── .cache/                   # 跨实例共享缓存（mod / 插件 / 依赖库 / Java 要求）
 └── servers/
     └── <MC 版本>/            # 每个小版本一个自包含实例
         ├── config.yml        # MCDR 配置（自动生成）
+        ├── .deploy-meta.json # 部署元数据（loader 版本 / mod sha1）
         ├── plugins/          # MCDR 插件
         ├── start.bat/start.sh
         └── server/           # 服务器文件
             ├── minecraft_server.jar
             ├── mods/         # fabric mod
+            ├── libraries/    # fabric 依赖库（链接到 .cache/libraries）
             └── world/datapacks/   # ← 你的数据包放这里
 ```
 
@@ -64,8 +68,8 @@ Copy-Item config.example.yaml config.yaml
 
 | 命令 | 说明 |
 | --- | --- |
-| `list` | 列出配置中的版本组、实例、mod、插件 |
-| `deploy [--group G] [--version V] [--dry-run] [--force]` | 部署指定/全部实例（默认幂等补齐、断点继续；`--force` 重下全部并覆盖） |
+| `list` | 列出全局插件、版本组、实例、mod、各组生效插件 |
+| `deploy [--group G] [--version V] [--dry-run] [--force]` | 部署指定/全部实例（默认按 sha1 / HTTP 指纹 / loader 版本判定失效，未变的跳过；`--force` 重下全部并覆盖） |
 | `status [--version V]` | 查看部署状态与启动方式 |
 | `start [--group G] [--version V] [--update]` | 前台启动 MCDR（`--update` 先就地刷新启动命令/端口再启动） |
 | `configure-server [--group G] [--version V] [--port N] [--gamemode M] [--rcon-*]` | 配置实例的端口/游戏模式/RCON（部署后冷改；旧名 `set-ports` 仍可用） |

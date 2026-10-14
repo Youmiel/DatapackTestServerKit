@@ -8,6 +8,8 @@ MCDR 启动时会加载 plugins/ 下的插件；也可在运行中 !!MCDR plg re
 
 插件跨 MC 版本通用：下载统一进共享缓存 .cache/plugins/（一次网络下载），
 各实例 deploy 时从缓存复制到自身 plugins/，多版本不重复下载。
+失效判定不需要下载：HEAD 探测 ETag/Last-Modified/Content-Length 与缓存记录
+比对，指纹变化（或 URL 改变）才重下；不能探测时沿用缓存，不阻塞部署。
 """
 from __future__ import annotations
 
@@ -15,9 +17,10 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from . import metadata
 from .config import PluginSpec, RootConfig
-from .http_util import Http
-from .paths import CACHE_ROOT, instance_paths, venv_bin
+from .http_util import Http, fingerprint_usable, sha1_file
+from .paths import PLUGIN_CACHE_ROOT, instance_paths, venv_bin
 
 DEFAULT_JDK_ARGS = [
     "-Xms1G",
@@ -26,9 +29,6 @@ DEFAULT_JDK_ARGS = [
     "-Dstdout.encoding=UTF-8",
     "-Dstderr.encoding=UTF-8",
 ]
-
-# 插件共享缓存目录（跨实例/跨 MC 版本复用同一插件文件）
-PLUGIN_CACHE_DIR = CACHE_ROOT / "plugins"
 
 
 def render_start_command(
@@ -256,50 +256,101 @@ def write_mcdr_config(
     )
 
 
+def _plugin_filename(spec: PluginSpec) -> str:
+    """从 URL 末段推断插件文件名，失败时退化为 <id>.py。"""
+    name = spec.url.rstrip("/").split("/")[-1]
+    if not name or "." not in name:
+        name = f"{spec.id}.py"
+    return name
+
+
+def _cache_stale(
+    cache_file: Path,
+    url: str,
+    entry: dict | None,
+    http: Http,
+    verify: bool,
+    force: bool,
+) -> tuple[bool, str]:
+    """判断插件共享缓存是否需要重下。返回 (是否失效, 原因说明)。
+
+    判定不依赖下载：HEAD 取远端指纹（ETag/Last-Modified/Content-Length）
+    与缓存索引记录比对；无法探测（无网/服务端不支持 HEAD）时**沿用缓存**，
+    避免因网络问题阻塞部署。
+    """
+    if force:
+        return True, "强制重下"
+    if not (cache_file.exists() and cache_file.stat().st_size > 0):
+        return True, "缓存缺失"
+    if not isinstance(entry, dict):
+        return True, "无缓存记录"
+    if entry.get("url") != url:
+        return True, "来源 URL 变化"
+    if not verify:
+        return False, "校验关闭，沿用缓存"
+    local = entry.get("fingerprint") or {}
+    remote = http.head_fingerprint(url)
+    if remote is None:
+        print(f"[网络] 无法探测远端指纹（无网/不支持 HEAD），沿用缓存: {url}")
+        return False, "远端指纹不可用"
+    if not fingerprint_usable(local):
+        return False, "本地无指纹记录"
+    if local != remote:
+        return True, "远端指纹变化"
+    return False, "远端指纹一致"
+
+
 def install_plugins(
     mc_version: str,
     plugins: list[PluginSpec],
     http: Http,
     force: bool = False,
+    verify: bool = True,
 ) -> list[Path]:
     """把配置的 MCDR 插件（显式 URL）装进实例 plugins/。返回落盘到实例的文件。
 
     插件跨 MC 版本通用，故统一走**共享缓存** `.cache/plugins/`：
-      1) 缓存里没有该文件（或 force）→ 网络下载到缓存（一次）；
-      2) 从缓存复制到实例 plugins/（实例已有且非空且非 force 时跳过）。
+      1) 确保缓存有该文件 —— 已缓存且“不下载即可判定未变”时直接复用；
+      2) 从缓存复制到实例 plugins/（实例已有且内容一致时跳过）。
     返回的是实例 plugins/ 下的路径（保持原调用方语义）。
-    详细状态（网络下载 / 缓存命中 / 实例已有）在此打印。
     """
     paths = instance_paths(mc_version)
     plugins_dir = paths["plugins"]
     plugins_dir.mkdir(parents=True, exist_ok=True)
-    cache_dir = PLUGIN_CACHE_DIR
+    cache_dir = PLUGIN_CACHE_ROOT
     cache_dir.mkdir(parents=True, exist_ok=True)
+    index = metadata.load_cache_index(cache_dir)
     installed: list[Path] = []
     for spec in plugins:
         if not spec.url:
             continue
-        # 从 URL 推断文件名，失败用 id
-        name = spec.url.rstrip("/").split("/")[-1]
-        if not name or "." not in name:
-            name = f"{spec.id}.py"
+        name = _plugin_filename(spec)
         cache_file = cache_dir / name
         dest = plugins_dir / name
+        entry = index.get(name) if isinstance(index.get(name), dict) else None
 
-        # 1) 先确保共享缓存有该文件（无缓存 / force 才真正联网下载）。
-        #    即使本实例插件已齐全也回填缓存，供其它新实例复用。
-        if force or not (cache_file.exists() and cache_file.stat().st_size > 0):
-            tag = "强制下载" if force else "下载"
-            print(f"[{mc_version}] {tag} 插件 -> 缓存: {name}")
-            http.download(spec.url, cache_file)
+        # 1) 共享缓存：不下载即可判定失效
+        stale, why = _cache_stale(
+            cache_file, spec.url, entry, http, verify=verify, force=force
+        )
+        if stale:
+            print(f"[{mc_version}] 下载插件 -> 共享缓存: {name}（{why}）")
+            fingerprint: dict = {}
+            http.download(spec.url, cache_file, fingerprint_out=fingerprint)
+            entry = {"url": spec.url, "fingerprint": fingerprint}
+            index[name] = entry
+            metadata.save_cache_index(cache_dir, index)
+        else:
+            print(f"[{mc_version}] 插件缓存命中: {name}（{why}）")
 
-        # 2) 实例已有且非空且非 force：跳过（补齐式/断点续部署）
+        # 2) 实例 plugins/：与缓存比对内容（本地重算 sha1，不联网）
+        cache_sha1 = sha1_file(cache_file)
         if not force and dest.exists() and dest.stat().st_size > 0:
-            print(f"[{mc_version}] 插件已存在，跳过: {name}")
-            installed.append(dest)
-            continue
-
-        # 3) 从缓存复制到实例
+            if not verify or sha1_file(dest) == cache_sha1:
+                print(f"[{mc_version}] 插件已存在，跳过: {name}")
+                installed.append(dest)
+                continue
+            print(f"[{mc_version}] 插件实例内容与缓存不符，重新复制: {name}")
         print(f"[{mc_version}] 插件缓存命中，复制: {name}")
         shutil.copyfile(cache_file, dest)
         installed.append(dest)

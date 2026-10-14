@@ -6,14 +6,25 @@
   - version: 可选锁定。Modrinth 填 version_id（8位）或精确 version_number；
              CurseForge 填 fileId（数字）。
   未锁定时自动选该 MC 版本 + fabric 下的最新 release。
-"""
+下载走**共享缓存** `.cache/mods/`：同一文件名只联网下载一次，各实例从缓存复制
+（刻意不做硬链接：避免删除/覆盖单实例文件时语义纠缠）。失效判定用 API 给出的
+sha1 在本地重算比对 —— 不下载即可知道缓存/实例里的文件是否还是期望内容。"""
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import metadata
 from .config import ModSpec, RootConfig
-from .http_util import DownloadError, Http, build_curseforge_http, build_modrinth_http
+from .http_util import (
+    DownloadError,
+    Http,
+    build_curseforge_http,
+    build_modrinth_http,
+    sha1_file,
+)
+from .paths import MOD_CACHE_ROOT
 
 GAME_ID = 432  # Minecraft
 CLASS_MODS = 6  # CurseForge "Minecraft Mods" class
@@ -150,7 +161,7 @@ class CurseForgeSource(ModSource):
             filename=chosen["fileName"],
             url=chosen["downloadUrl"]
             or f"https://www.curseforge.com/minecraft/mc-mods/{slug}/download/{chosen['id']}/file",
-            sha1=str(chosen.get("hashes", [{}])[0].get("value", "")) if chosen.get("hashes") else "",
+            sha1=_cf_hash(chosen, 1),
             version_label=str(chosen.get("displayName", chosen.get("fileName", ""))),
         )
 
@@ -172,6 +183,14 @@ def _looks_like_version_id(s: str) -> bool:
 def _is_fabric_cf(file: dict) -> bool:
     # CurseForge file 里 modLoader 相关在 gameVersions 中，如 "Fabric"
     return "Fabric" in file.get("gameVersions", [])
+
+
+def _cf_hash(file: dict, algo: int) -> str:
+    """取 CurseForge file 的指定算法哈希（1=SHA1, 2=MD5）；无则空串。"""
+    for h in file.get("hashes") or []:
+        if h.get("algo") == algo:
+            return str(h.get("value", "")).lower()
+    return ""
 
 
 _SOURCES: dict[str, ModSource] = {
@@ -204,21 +223,76 @@ def resolve_mods(
     return out
 
 
-def download_mod(
-    resolved: ResolvedMod, mods_dir: Path, cfg: RootConfig, force: bool = False
-) -> Path:
-    """把已解析的 mod 下载到 mods 目录（带 sha1 校验）。
+def _http_for(spec: ModSpec, cfg: RootConfig) -> Http:
+    if spec.source == "curseforge":
+        return build_curseforge_http(cfg.curseforge, cfg.network)
+    return build_modrinth_http(cfg.modrinth, cfg.network)
 
-    force=False（默认）：目标已存在且非空则复用（断点续部署/补齐）。
-    force=True：无条件重下覆盖（用于 --force 重新部署 / 更新 mod）。
+
+def _record_index(name: str, resolved: ResolvedMod) -> None:
+    """把共享缓存条目写入 .cache/mods/_index.json（来源 + 期望 sha1）。"""
+    index = metadata.load_cache_index(MOD_CACHE_ROOT)
+    entry: dict = {
+        "url": resolved.url,
+        "sha1": (resolved.sha1 or "").lower(),
+    }
+    if resolved.version_label:
+        entry["version"] = resolved.version_label
+    if resolved.spec.source != "modrinth":
+        entry["source"] = resolved.spec.source
+    index[name] = entry
+    metadata.save_cache_index(MOD_CACHE_ROOT, index)
+
+
+def install_mod(
+    resolved: ResolvedMod,
+    mods_dir: Path,
+    cfg: RootConfig,
+    force: bool = False,
+    verify: bool = True,
+) -> tuple[Path, str]:
+    """确保 mod 就位：共享缓存 `.cache/mods/` -> 实例 `mods/`。
+
+    返回 (实例内路径, 状态标签)。共享缓存是唯一联网下载点（同文件跨实例/跨组
+    复用）；实例侧从缓存**复制**（不做硬链接，避免删除/覆盖语义纠缠）。
+
+    失效判定均不依赖下载（verify=True 时生效）：
+      - 缓存：本地重算 sha1 与 Modrinth/CurseForge 给出的 sha1 比对
+      - 实例：同上；不符则用缓存重新复制覆盖（只覆盖同名文件，
+        不同文件名的旧版本仍需手动清理）
+    verify=False（network.verify_sha1: false）时退化为“存在且非空即复用”。
     """
+    name = resolved.filename
+    want = (resolved.sha1 or "").lower()
     mods_dir.mkdir(parents=True, exist_ok=True)
-    dest = mods_dir / resolved.filename
-    if not force and dest.exists() and dest.stat().st_size > 0:
-        return dest
-    http = (
-        build_curseforge_http(cfg.curseforge, cfg.network)
-        if resolved.spec.source == "curseforge"
-        else build_modrinth_http(cfg.modrinth, cfg.network)
+    MOD_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+    cache_file = MOD_CACHE_ROOT / name
+    dest = mods_dir / name
+
+    # 1) 共享缓存
+    cache_ok = (
+        not force
+        and cache_file.exists()
+        and cache_file.stat().st_size > 0
+        and (not verify or not want or sha1_file(cache_file) == want)
     )
-    return http.download(resolved.url, dest, sha1=resolved.sha1)
+    if cache_ok:
+        status = "缓存命中"
+    else:
+        print(f"[mod] 下载 -> 共享缓存: {name}（{resolved.version_label}）")
+        _http_for(resolved.spec, cfg).download(
+            resolved.url, cache_file, sha1=want if verify else ""
+        )
+        _record_index(name, resolved)
+        status = "已下载"
+
+    # 2) 实例 mods/
+    if not force and dest.exists() and dest.stat().st_size > 0:
+        if not verify or not want or sha1_file(dest) == want:
+            return dest, "已存在，跳过"
+        print(
+            f"[mod] {name} 实例内容与期望不一致，用缓存覆盖"
+            f"（如同目录下还有该 mod 的其它版本文件，请手动删除）"
+        )
+    shutil.copyfile(cache_file, dest)
+    return dest, f"{status} -> 复制"
