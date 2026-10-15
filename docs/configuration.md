@@ -257,10 +257,18 @@ installer 版本、各 mod 的 sha1、各插件指纹。
 `deploy` 遇到旧实例的真实 `libraries/` 目录时，会**自动把内容移动合并**进共享
 缓存并替换为链接（`mcserver status` 会显示 `libraries: 已共享 / 独立`）。
 
-为什么只能用链接：fabric 的 server jar 实为 installer bootstrap，它只检查
-`.fabric/server/fabric-loader-*.jar` 列出的一些文件**是否存在**，且库目录路径在
-其中硬编码、不可配置 —— 因此无法用“下载到缓存再复制”的方式共享。
-附带收益：fabric 若判定安装不完整而重装，写入会经链接落到共享目录。
+为什么只能用链接：fabric 的 server jar 实为 installer bootstrap，其库目录路径
+硬编码、不可配置（`cwd/libraries`），无法像 mod / 插件那样“下载到缓存再复制”。
+
+目录里其实夹着**两类库**，启动时的行为不同：
+
+| 来源 | 体量 | 启动时对已有文件的处理 |
+| --- | --- | --- |
+| vanilla 打包库（1.18+，`META-INF/libraries`） | 大头（40MB+） | SHA-256 校验，**哈希匹配则跳过解压** |
+| fabric 自身库（asm / mixin / loader） | 7-8 个、几 MB | 只查存在性，每次启动全量重下 |
+
+因此共享对第一类**既省磁盘又省解压耗时**（后续实例启动只多一次哈希校验）；
+第二类会被重复下载，但写入仍经链接落进共享目录，不会额外占磁盘。
 
 > ⚠️ 删除整个实例目录时请注意：Windows 的 `shutil.rmtree` 会**跟随 junction**
 > 删掉共享库内容（`libraries.remove_link()` 提供只断链接的安全做法）。
